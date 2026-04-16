@@ -1,0 +1,10 @@
+schema_version=3
+state_backend=files
+automation=manual
+foundry_stages=build,qa
+foundry_max_attempts=3
+foundry_max_workers=2
+foundry_workers_build=2
+foundry_workers_qa=2
+sync_remote=origin
+default_branch=main
