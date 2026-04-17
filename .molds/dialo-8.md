@@ -22,7 +22,7 @@ code_branch:
   control-plane objects into `ops`.
 - It depends on `dialo-6` landing first. Do not start this before ownership
   cleanup, `tenant_connectors`, neutral shared runtime extraction, and
-  connector-vs-journey separation are already in place.
+  connector-vs-application separation are already in place.
 - This is the higher-blast-radius prerelease mold: code, SQL, grants, tests,
   docs, and self-hosted PostgREST exposure all change together.
 - It is acceptable for this to be a little rough because it is prerelease, but

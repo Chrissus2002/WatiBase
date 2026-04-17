@@ -80,7 +80,7 @@ present or ship as a standalone connector:
 - tenant configuration in `public.tenants` mixes workspace data with Wati
   connector credentials
 - `database/03_silver_layer.sql` currently mixes connector-owned contacts and
-  messages with journey-owned tables like `journey_intent_results` and
+  messages with non-connector tables like `journey_intent_results` and
   classifier config state
 - connector-owned operational tables currently live in `public` and
   connector-facing naming is embedded in grants, tests, docs, and self-hosted
@@ -114,9 +114,9 @@ to put connector-facing design artifacts before code is moved:
 Ground-truth code audit findings that materially affect scope:
 
 - `database/03_silver_layer.sql` currently contains both connector-owned tables
-  (`contacts`, `messages`, Wati key mappings) and journey-owned tables
+  (`contacts`, `messages`, Wati key mappings) and non-connector tables
   (`journey_intent_results`) plus public classifier config tables
-- `database/07_gold_layer.sql` is entirely journey-facing analytics today, not
+- `database/07_gold_layer.sql` is entirely application-facing analytics today, not
   connector-owned reporting
 - connector-owned control-plane tables live in `public`, not a dedicated `ops`
   schema
@@ -135,7 +135,7 @@ kinds of work.
 This phase is about answering:
 
 - what is the connector product boundary
-- what belongs to the connector versus Journey Builder
+- what belongs to the connector versus the application layer
 - where shared runtime code should live
 - how workspace identity differs from connector installation state
 - what the connector guarantees as its canonical output
@@ -173,7 +173,7 @@ Early design goals:
 4. Clarify product docs and setup
    - make the standalone connector story obvious from the repo root
    - document what Supabase schema contract it guarantees
-   - document deployment/runtime modes separately from the journey app
+   - document deployment/runtime modes separately from the application layer
 
 5. Clarify connector admin surface ownership
    - define the CLI-first operational surface the connector owns
@@ -192,7 +192,7 @@ Naming rationale:
 
 - `staging` describes the connector landing area for raw provider data
 - `canonical` describes the stable normalized conversation contract shared with
-  Journey Builder
+  downstream consumers
 - `analytics` describes downstream derived views and reporting projections
 - `ops` cleanly separates operational control-plane tables from the data model
 
@@ -212,7 +212,7 @@ Included in Phase A:
 - extract neutral shared runtime/data-access code out of `app/database.py`
 - make the connector-owned canonical contract explicit
 - make the connector-owned CLI/admin UX boundary explicit
-- separate connector-owned canonical objects from journey-owned objects by
+- separate connector-owned canonical objects from non-connector objects by
   ownership and file structure
 - update docs so the connector product boundary is explicit
 
@@ -230,7 +230,7 @@ Those belong to `dialo-8`.
 If this mold is implemented well, the implementer should come away with a clear
 mental model of four boundaries:
 
-1. connector product vs Journey Builder product
+1. connector runtime vs application layer
 2. real-time ingest vs batch/repair runtime
 3. canonical business data vs operational control-plane data
 4. workspace state vs connector-installation state
@@ -242,11 +242,10 @@ tribal knowledge.
 #### 14. Connector admin UX should be CLI-first in Phase A
 
 The current Streamlit app already contains connector operations, but it is the
-wrong long-term home for them because it mixes connector and Journey Builder
+wrong long-term home for them because it mixes connector and application-layer
 concerns:
 
-- `app/pages/2_Admin.py` combines connector operations with classifier
-  configuration
+- `app/pages/2_Admin.py` combines connector operations with application config
 - `app/auth.py` still expresses Wati installation assumptions directly in the
   main app auth/setup path
 
@@ -257,7 +256,6 @@ Locked direction:
 - make the connector admin surface CLI-first
 - name the command `wati-supabase`
 - support optional watcher commands, but keep them simple polling/console UX
-- move classifier configuration out of connector ops entirely
 
 Near-term connector CLI ownership should include:
 
@@ -269,16 +267,8 @@ Near-term connector CLI ownership should include:
 - daemon/webhook health
 - connection testing / doctor checks
 
-It should not include:
-
-- classifier configuration
-- journey analytics
-- audience generation
-- campaign strategy
-
 This is important for handoff because the implementer should be able to see the
-connector product boundary in the admin surface, not just in database files and
-scripts.
+connector boundary in the admin surface, not just in database files and scripts.
 
 Recommended command posture:
 
@@ -367,10 +357,10 @@ creates confusion and weak guarantees.
 
 #### 3. The canonical contract is the connector's public product surface
 
-`canonical` is not something owned by Journey Builder. It is the stable,
-documented output contract that the connector guarantees.
+`canonical` is the stable, documented output contract that the connector
+guarantees.
 
-Journey Builder is one consumer of that contract. Other consumers could be:
+Downstream consumers could be:
 
 - BI/reporting tools
 - CRM sync jobs
@@ -415,7 +405,7 @@ Suggested canonical surface to document:
   - `text`
   - provider message ID / provider conversation ID as reference fields
 
-The classifier depends on this contract, but does not define it.
+Downstream consumers depend on this contract, but do not define it.
 
 #### 4. Keep Python reconciliation as repair/enrichment, not core ingest
 
@@ -616,7 +606,7 @@ Why this is the right production choice:
 - aligns with the product story: connector owns `staging`, `canonical`, and
   `ops`
 
-#### 11. `canonical` must not include journey-owned tables
+#### 11. `canonical` must not include non-connector tables
 
 The current `silver` schema is not a pure connector-owned normalized model. It
 also contains:
@@ -628,7 +618,7 @@ Locked direction:
 
 - `canonical` for the connector product should only include connector-owned
   normalized conversation data and helper views
-- journey-specific tables are explicitly out of connector scope
+- non-connector tables are explicitly out of connector scope
 
 Connector-owned `canonical` target:
 
@@ -639,16 +629,15 @@ Connector-owned `canonical` target:
 
 Not connector-owned:
 
-- journey classification results
+- classification results
 - classifier config versions
-- journey stage definitions
 - segment definitions
 
 Implication:
 
 - the current `database/03_silver_layer.sql` file must be split by ownership
   before the end state is clean
-- actual physical `silver -> canonical` rename is blocked until the journey
+- actual physical `silver -> canonical` rename is blocked until the non-connector
   tables are extracted or otherwise relocated
 
 This is the most important hidden constraint surfaced by the code audit.
@@ -674,7 +663,7 @@ Locked direction:
 Recommended migration strategy:
 
 1. split ownership first
-   - separate connector-owned canonical tables from journey-owned tables
+   - separate connector-owned canonical tables from non-connector tables
    - create neutral shared runtime module
    - introduce `tenant_connectors`
    - move control-plane tables into `ops`
@@ -759,7 +748,7 @@ The intended order inside this mold is:
    - introduce `tenant_connectors` before rewriting lots of callsites
 4. introduce `ops` ownership clearly
    - move the control-plane story out of `public`
-5. separate connector-owned canonical objects from journey-owned objects
+5. separate connector-owned canonical objects from non-connector objects
    - reduce ambiguity in the current `silver` layer/file ownership
 6. only then sweep docs/tests touched by the new boundary
 
@@ -771,8 +760,8 @@ That order is recommended because each step reduces ambiguity for the next one.
 - Do not move code into `shared/` if it still contains Streamlit or app-only
   behavior.
 - Do not treat `ops` as "random leftovers"; it is the connector control plane.
-- Do not define the canonical contract in Journey Builder terms only; other
-  consumers should also be able to rely on it.
+- Do not define the canonical contract narrowly; all downstream consumers should
+  be able to rely on it.
 - Do not keep Wati credentials on `public.tenants` just because it is the
   easiest place to reach from existing code.
 - Do not leave classifier configuration sitting on the same admin surface just
@@ -834,7 +823,7 @@ That order is recommended because each step reduces ambiguity for the next one.
 - Mold design defines neutral shared runtime module ownership
 - Mold design defines identity refresh as permanent but non-destructive
 - Mold design defines `ops` as a real schema target
-- Mold design defines that `canonical` excludes journey-owned tables
+- Mold design defines that `canonical` excludes non-connector tables
 - Mold design defers physical rename and cutover to `dialo-8`
 - Mold design is now scoped as a concrete Phase A build slice
 - Future build should leave connector scripts runnable without importing
@@ -848,16 +837,14 @@ That order is recommended because each step reduces ambiguity for the next one.
 
 ## Implementation Notes
 
-- Recommended design order: work this mold before the Journey Builder mold,
-  because the connector currently contains the messier boundary problems.
 - Keep the product explicitly named `Wati -> Supabase`; that is clearer and more
   honest than pretending it is already a generic messaging connector.
 - The naming decision should be treated as architectural vocabulary first.
   Physical rename is explicitly handled by `dialo-8`, not this mold.
 - The largest hidden dependency discovered in design is that `silver` currently
-  contains both connector and journey state. That must be resolved before the
-  connector can honestly claim a clean `canonical` schema.
-- `database/07_gold_layer.sql` being journey-owned analytics, not connector
+  contains both connector and non-connector state. That must be resolved before
+  the connector can honestly claim a clean `canonical` schema.
+- `database/07_gold_layer.sql` being application-layer analytics, not connector
   functionality, is the second major scope limiter for a single-slice build.
 - The scaffold docs are not optional fluff; they are the intended rails for the
   first extraction and contract commits in this product area.
