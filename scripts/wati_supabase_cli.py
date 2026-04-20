@@ -6,11 +6,16 @@ CLI-first admin surface for the Wati -> Supabase connector.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
+from dotenv import load_dotenv
 from typing import Any
 
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'shared'))
+
+from supabase_client import SupabaseClient
 
 @dataclass
 class StatusSnapshot:
@@ -21,18 +26,6 @@ class StatusSnapshot:
     wati_phone_number: str | None
     drift_run: dict[str, Any] | None
     active_job: dict[str, Any] | None
-
-
-def get_cli_supabase_client():
-    try:
-        from supabase_client import get_supabase_client
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            f"Missing Python dependency '{exc.name}'. Install requirements.txt "
-            "before using database-backed CLI commands."
-        ) from exc
-
-    return get_supabase_client()
 
 
 def _placeholder(parser: argparse.ArgumentParser, command_path: str) -> None:
@@ -47,7 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     setup_parser = subparsers.add_parser("setup", help="Connector install and setup helpers")
-    _placeholder(setup_parser, "setup")
+    setup_parser.add_argument("--wati", action='store_true', help="Setting up wati credentials")
+    setup_parser.add_argument("--supabase", action='store_true', help="Setting up supabase credentials")
+    setup_parser.set_defaults(handler=handle_setup)
 
     test_parser = subparsers.add_parser("test-connection", help="Verify Supabase connectivity")
     test_parser.set_defaults(handler=handle_test_connection)
@@ -103,16 +98,20 @@ def handle_not_implemented(args: argparse.Namespace) -> int:
 
 def handle_test_connection(args: argparse.Namespace) -> int:
     try:
-        client = get_cli_supabase_client()
-        response = client.table("tenants").select("tenant_id").limit(1).execute()
-    except Exception as exc:
-        print(f"Connection failed: {exc}", flush=True)
-        return 1
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+        client = SupabaseClient(supabase_url, supabase_key)
+        response = client.test_connection()
 
-    count = len(response.data or [])
-    print("Supabase connection OK", flush=True)
-    print(f"Tenant probe rows returned: {count}", flush=True)
-    return 0
+        if response:
+            print("Supabase connection OK", flush=True)
+            return 0
+        else:
+            print("Supabase connection failed", flush=True)
+            return 1
+    except Exception as e:
+        print(f"Connection error: {e}", flush=True)
+        return 1
 
 
 def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
@@ -238,6 +237,79 @@ def handle_watch_status(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\nStopped watch.", flush=True)
         return 0
+    
+def handle_setup(args) -> int:
+    if args.wati:
+        setup_wati_credentials()
+    if args.supabase:
+        setup_supabase_credentials()
+    return 0
+
+def setup_wati_credentials() -> bool:
+    wati_account_id = input("Wati Account ID: ")
+    wati_api_token = input("Wati API Token: ")
+    file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    
+    # Read existing .env file
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+    
+    # Update or add WATI_ACCOUNT_ID and WATI_API_TOKEN
+    wati_id_updated = False
+    wati_token_updated = False
+    for i, line in enumerate(lines):
+        if line.startswith('WATI_ACCOUNT_ID='):
+            lines[i] = f'WATI_ACCOUNT_ID={wati_account_id}\n'
+            wati_id_updated = True
+        elif line.startswith('WATI_API_TOKEN='):
+            lines[i] = f'WATI_API_TOKEN={wati_api_token}\n'
+            wati_token_updated = True
+    
+    # If not found, add them
+    if not wati_id_updated:
+        lines.append(f'WATI_ACCOUNT_ID={wati_account_id}\n')
+    if not wati_token_updated:
+        lines.append(f'WATI_API_TOKEN={wati_api_token}\n')
+    
+    # Write back to .env file
+    with open(file_path, 'w') as f:
+        f.writelines(lines)
+    
+    print("Updated Wati credentials")
+    return True
+
+def setup_supabase_credentials() -> bool:
+    supabase_url = input("Supabase URL: ")
+    supabase_anon_key = input("Supabase Anon Key: ")
+    file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    
+    # Read existing .env file
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+    
+    # Update or add SUPABASE_URL and SUPABASE_ANON_KEY
+    supabase_url_updated = False
+    supabase_anon_key_updated = False
+    for i, line in enumerate(lines):
+        if line.startswith('SUPABASE_URL='):
+            lines[i] = f'SUPABASE_URL={supabase_url}\n'
+            supabase_url_updated = True
+        elif line.startswith('SUPABASE_KEY='):
+            lines[i] = f'SUPABASE_KEY={supabase_anon_key}\n'
+            supabase_anon_key_updated = True
+    
+    # If not found, add them
+    if not supabase_url_updated:
+        lines.append(f'SUPABASE_URL={supabase_url}\n')
+    if not supabase_anon_key_updated:
+        lines.append(f'SUPABASE_KEY={supabase_anon_key}\n')
+    
+    # Write back to .env file
+    with open(file_path, 'w') as f:
+        f.writelines(lines)
+    
+    print("Updated Supabase credentials")
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
