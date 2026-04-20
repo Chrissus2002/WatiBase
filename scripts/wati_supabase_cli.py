@@ -16,6 +16,13 @@ from typing import Any
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'shared'))
 
 from supabase_client import SupabaseClient
+from wati_client import WatiClient
+
+load_dotenv()
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+client = SupabaseClient(supabase_url, supabase_key)
+wati_conn = WatiClient(os.getenv("WATI_ACCOUNT_ID"))
 
 @dataclass
 class StatusSnapshot:
@@ -98,9 +105,6 @@ def handle_not_implemented(args: argparse.Namespace) -> int:
 
 def handle_test_connection(args: argparse.Namespace) -> int:
     try:
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_KEY")
-        client = SupabaseClient(supabase_url, supabase_key)
         response = client.test_connection()
 
         if response:
@@ -115,10 +119,8 @@ def handle_test_connection(args: argparse.Namespace) -> int:
 
 
 def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
-    client = get_cli_supabase_client()
-
     tenant_response = (
-        client.table("tenants")
+        client.get_client().table("tenant")
         .select("tenant_id, name, slug, wati_api_token, wati_phone_number")
         .eq("tenant_id", tenant_id)
         .limit(1)
@@ -131,7 +133,7 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
     tenant = tenant_rows[0]
 
     drift_response = (
-        client.table("daemon_task_runs")
+        client.get_client().schema("ops").table("daemon_task_runs")
         .select("status, started_at, finished_at, result, error_message, notes")
         .eq("tenant_id", tenant_id)
         .eq("task_name", "exact_contact_drift")
@@ -142,7 +144,7 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
     drift_rows = drift_response.data or []
 
     active_job_response = (
-        client.table("import_jobs")
+        client.get_client().schema("ops").table("import_jobs")
         .select(
             "job_id, status, created_at, completed_at, processed_messages, "
             "total_messages, subprocess_pid"

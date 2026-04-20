@@ -26,10 +26,10 @@ class SupabaseClient:
     def get_tenant_info(self, tenant_id: str = None):
         try:
             client = self.client
-            if tenant_id == None:
+            if tenant_id is None:
                 result = client.table("tenants").select("*").execute()
             else:
-                result = client.table("tenants").select("*").eq("id", tenant_id).execute()
+                result = client.table("tenants").select("*").eq("tenant_id", tenant_id).execute()
             return result
         except Exception as e:
             print(f"Failed to get tenant info: {e}")

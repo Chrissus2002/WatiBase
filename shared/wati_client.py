@@ -72,9 +72,9 @@ class WatiClient:
             return all_messages
 
 def main():
-    wati = WatiClient('310131')
+    wati = WatiClient(os.getenv("WATI_ACCOUNT_ID"))
     #contacts = wati.get_contacts()
-    messages = wati.get_messages('5216291105188')
+    messages = wati.get_messages('123456789')
     print(json.dumps(messages, indent=4))
 
 if __name__ == "__main__":

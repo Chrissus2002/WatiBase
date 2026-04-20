@@ -17,14 +17,16 @@ create table if not exists public.tenant (
 -- One active Wati install per tenant enforced by partial unique index below.
 create table if not exists public.tenant_connectors (
     connector_id uuid not null default gen_random_uuid() primary key,
+    provider text not null default 'wati',
+
     tenant_id bigint not null references public.tenant(tenant_id),
-    wati_account_id text,
+    wati_api_url text,
     wati_api_token text,
+
     is_active boolean not null default true,
     last_successful_sync_at timestamp with time zone,
     last_error text,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-    updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
 -- At most one active Wati connector per tenant
