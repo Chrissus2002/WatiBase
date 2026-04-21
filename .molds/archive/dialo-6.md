@@ -1,13 +1,13 @@
 <!-- molds
 id: dialo-6
-stage: design
+stage: closed
 resume_stage:
-parent: 
-deps: 
+parent:
+deps:
 priority: P2
 created_at: 2026-04-15T16:28:23Z
-updated_at: 2026-04-15T20:16:31Z
-closed_at:
+updated_at: 2026-04-21T00:00:00Z
+closed_at: 2026-04-21T00:00:00Z
 defer_until:
 code_branch:
 -->
