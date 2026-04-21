@@ -1,16 +1,18 @@
 <!-- molds
 id: supawati-1
-stage: build
+stage: closed
 resume_stage: 
 parent: 
 deps: 
 priority: P2
 created_at: 2026-04-21T16:23:00Z
-updated_at: 2026-04-21T17:26:41Z
-closed_at: 
+updated_at: 2026-04-21T17:31:15Z
+closed_at: 2026-04-21T17:31:15Z
 defer_until: 
 code_branch: 
 -->
+
+
 
 
 # CLI download contacts and messages locally
