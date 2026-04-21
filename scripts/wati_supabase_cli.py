@@ -6,14 +6,14 @@ CLI-first admin surface for the Wati -> Supabase connector.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from pathlib import Path
 from typing import Any
-
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'shared'))
 
 from supabase_client import SupabaseClient
 from wati_client import WatiClient
@@ -90,6 +90,21 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_subparsers = daemon_parser.add_subparsers(dest="daemon_command", required=True)
     daemon_run_parser = daemon_subparsers.add_parser("run", help="Run the daemon loop")
     _placeholder(daemon_run_parser, "daemon run")
+
+    to_file_parser = subparsers.add_parser("to-file", help="Download Wati data to local files")
+    to_file_subparsers = to_file_parser.add_subparsers(dest="to_file_command", required=True)
+
+    to_file_contacts_parser = to_file_subparsers.add_parser("contacts", help="Download all contacts to a JSON file")
+    to_file_contacts_parser.add_argument("--output", default="contacts.json", help="Output file path (default: contacts.json)")
+    to_file_contacts_parser.set_defaults(handler=handle_to_file_contacts)
+
+    to_file_messages_parser = to_file_subparsers.add_parser("messages", help="Download messages to local JSON files")
+    to_file_messages_group = to_file_messages_parser.add_mutually_exclusive_group(required=True)
+    to_file_messages_group.add_argument("--phone", help="Phone number of a single contact")
+    to_file_messages_group.add_argument("--all", action="store_true", help="Download messages for all contacts")
+    to_file_messages_parser.add_argument("--output", default=None, help="Output file path for single contact (default: messages_<phone>.json)")
+    to_file_messages_parser.add_argument("--output-dir", default="messages", help="Output directory for --all (default: messages/)")
+    to_file_messages_parser.set_defaults(handler=handle_to_file_messages)
 
     return parser
 
@@ -312,6 +327,63 @@ def setup_supabase_credentials() -> bool:
     
     print("Updated Supabase credentials")
     return True
+
+
+def handle_to_file_contacts(args: argparse.Namespace) -> int:
+    try:
+        contacts = wati_conn.get_contacts()
+    except Exception as exc:
+        print(f"Failed to fetch contacts: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+    output_path = Path(args.output)
+    output_path.write_text(json.dumps(contacts, indent=2))
+    print(f"Wrote {len(contacts)} contacts to {output_path}", flush=True)
+    return 0
+
+
+def handle_to_file_messages(args: argparse.Namespace) -> int:
+    if args.phone:
+        try:
+            result = wati_conn.get_messages(args.phone)
+        except Exception as exc:
+            print(f"Failed to fetch messages: {exc}", file=sys.stderr, flush=True)
+            return 1
+
+        messages = result.get(args.phone, [])
+        output_path = Path(args.output) if args.output else Path(f"messages_{args.phone}.json")
+        output_path.write_text(json.dumps(messages, indent=2))
+        print(f"Wrote {len(messages)} messages to {output_path}", flush=True)
+        return 0
+
+    # --all: fetch contacts first, then messages per contact
+    try:
+        contacts = wati_conn.get_contacts()
+    except Exception as exc:
+        print(f"Failed to fetch contacts: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, contact in enumerate(contacts, 1):
+        phone = contact.get("wAid") or contact.get("phone") or contact.get("whatsappNumber")
+        if not phone:
+            print(f"[{i}/{len(contacts)}] Skipping contact with no phone number", flush=True)
+            continue
+        print(f"[{i}/{len(contacts)}] Fetching messages for {phone}", flush=True)
+        try:
+            result = wati_conn.get_messages(phone)
+            messages = result.get(phone, [])
+        except Exception as exc:
+            print(f"  Error fetching messages for {phone}: {exc}", flush=True)
+            continue
+
+        file_path = output_dir / f"messages_{phone}.json"
+        file_path.write_text(json.dumps(messages, indent=2))
+
+    print(f"Done. Files written to {output_dir}/", flush=True)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
