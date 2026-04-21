@@ -26,7 +26,7 @@ create table if not exists public.tenant_connectors (
     is_active boolean not null default true,
     last_successful_sync_at timestamp with time zone,
     last_error text,
-    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
 -- At most one active Wati connector per tenant
@@ -69,7 +69,7 @@ create table if not exists staging.messages_raw_data (
 -- One row per canonical contact identity. Provider-agnostic.
 create table if not exists canonical.contacts (
       contact_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id BIGINT NOT NULL REFERENCES public.tenants(tenant_id),
+  tenant_id BIGINT NOT NULL REFERENCES public.tenant(tenant_id),
   batch_id UUID REFERENCES public.import_jobs(job_id),  -- NULL for webhooks
 
   -- Phone identity (canonical key for deduplication)
@@ -116,9 +116,9 @@ create index if not exists idx_contact_provider_keys_contact
 -- One row per conversational unit. direction and timestamp are connector-guaranteed.
 create table if not exists canonical.messages (
   message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id BIGINT NOT NULL REFERENCES public.tenants(tenant_id),
-  contact_id UUID NOT NULL REFERENCES silver.contacts(contact_id),
-  batch_id UUID REFERENCES public.import_jobs(job_id),  -- NULL for webhooks
+  tenant_id BIGINT NOT NULL REFERENCES public.tenant(tenant_id),
+  contact_id UUID NOT NULL REFERENCES canonical.contacts(contact_id),
+  batch_id UUID REFERENCES ops.import_jobs(job_id),  -- NULL for webhooks
   conversation_id text,
 
   -- Message content
@@ -198,3 +198,32 @@ create index if not exists idx_webhook_logs_tenant_received
 
 create index if not exists idx_webhook_logs_expires
     on ops.webhook_logs (expires_at);
+
+-- Per-event processing outcome. One row per webhook_log entry processed.
+-- Retained longer than raw payloads — summarized outcome, not raw data.
+create table if not exists ops.webhook_processing_log (
+    id uuid not null default gen_random_uuid() primary key,
+    log_id uuid not null references ops.webhook_logs(log_id),
+    tenant_id bigint references public.tenant(tenant_id),
+    status text not null check (status in ('success', 'failed', 'skipped')),
+    contacts_upserted int not null default 0,
+    messages_inserted int not null default 0,
+    error text,
+    processed_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+create index if not exists idx_webhook_processing_log_tenant
+    on ops.webhook_processing_log (tenant_id, processed_at desc);
+
+-- Aggregated per-tenant webhook health view.
+-- Cheap day-to-day health indicator without scanning raw logs.
+create table if not exists ops.webhook_processing_status (
+    tenant_id bigint not null references public.tenant(tenant_id) primary key,
+    last_received_at timestamp with time zone,
+    last_processed_at timestamp with time zone,
+    last_status text,
+    total_received bigint not null default 0,
+    total_succeeded bigint not null default 0,
+    total_failed bigint not null default 0,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);

@@ -17,6 +17,7 @@ from typing import Any
 
 from supabase_client import SupabaseClient
 from wati_client import WatiClient
+from batch_contact_import import BatchContactImport
 
 load_dotenv()
 supabase_url = os.getenv("SUPABASE_URL")
@@ -68,7 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser = subparsers.add_parser("sync", help="Run connector sync operations")
     sync_subparsers = sync_parser.add_subparsers(dest="sync_command", required=True)
     sync_contacts_parser = sync_subparsers.add_parser("contacts", help="Sync contacts from Wati")
-    _placeholder(sync_contacts_parser, "sync contacts")
+    sync_contacts_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
+    sync_contacts_parser.set_defaults(handler=handle_sync_contacts)
 
     backfill_parser = subparsers.add_parser("backfill", help="Run connector backfill operations")
     backfill_subparsers = backfill_parser.add_subparsers(dest="backfill_command", required=True)
@@ -327,6 +329,17 @@ def setup_supabase_credentials() -> bool:
     
     print("Updated Supabase credentials")
     return True
+
+
+def handle_sync_contacts(args: argparse.Namespace) -> int:
+    try:
+        importer = BatchContactImport(client, wati_conn, args.tenant_id)
+        result = importer.run()
+        print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']} skipped={result['skipped']}", flush=True)
+        return 0
+    except Exception as exc:
+        print(f"Sync failed: {exc}", file=sys.stderr, flush=True)
+        return 1
 
 
 def handle_to_file_contacts(args: argparse.Namespace) -> int:
