@@ -56,7 +56,7 @@ class WatiClient:
             session.headers.update(self.headers)
 
             while True:
-                url = self.url + f"/api/v1/getMessages/{phone_number}?pageSize={page_size}?page={page_number}"
+                url = self.url + f"/api/v1/getMessages/{phone_number}?pageSize={page_size}&page={page_number}"
                 response = session.get(url)
                 if response.status_code != 200:
                     raise Exception(f"Failed to request messages at url: {url}")
