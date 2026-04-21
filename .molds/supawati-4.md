@@ -1,6 +1,6 @@
 <!-- molds
 id: supawati-4
-stage: design
+stage: qa
 resume_stage:
 parent: 
 deps: 
