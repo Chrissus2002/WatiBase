@@ -35,6 +35,7 @@ class BatchContactImport:
                     "last_seen_at": now,
                 }
                 for c in batch
+                if c.get("id")
             ]
 
             client.schema("staging").table("contacts_raw_data").upsert(
@@ -45,9 +46,15 @@ class BatchContactImport:
 
         # Step 3 & 4: Promote each contact into canonical.contacts and contact_provider_keys
         for c in contacts:
+            wati_id = c.get("id")
+            if not wati_id:
+                print(f"Warning: skipping contact — no id field")
+                skipped += 1
+                continue
+
             raw_phone = c.get("wAid") or c.get("phone") or c.get("whatsappNumber")
             if not raw_phone:
-                print(f"Warning: skipping contact id={c.get('id')} — no recoverable phone")
+                print(f"Warning: skipping contact id={wati_id} — no recoverable phone")
                 skipped += 1
                 continue
 
@@ -58,7 +65,7 @@ class BatchContactImport:
                 continue
 
             name = c.get("fullName") or c.get("name")
-            wati_contact_id = str(c["id"])
+            wati_contact_id = str(wati_id)
 
             canonical_row = {
                 "tenant_id": self.db_tenant_id,
