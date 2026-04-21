@@ -70,7 +70,7 @@ create table if not exists staging.messages_raw_data (
 create table if not exists canonical.contacts (
       contact_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id BIGINT NOT NULL REFERENCES public.tenant(tenant_id),
-  batch_id UUID REFERENCES public.import_jobs(job_id),  -- NULL for webhooks
+  batch_id UUID REFERENCES ops.import_jobs(job_id),  -- NULL for webhooks
 
   -- Phone identity (canonical key for deduplication)
   phone_normalized TEXT NOT NULL, -- e.g., "5215554146581"
