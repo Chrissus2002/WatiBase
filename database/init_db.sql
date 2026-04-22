@@ -7,7 +7,7 @@ create schema if not exists ops;
 -- PUBLIC — workspace identity and connector config
 -- Workspace identity only. No connector credentials here.
 create table if not exists public.tenant (
-    tenant_id bigint generated always as identity primary key,
+    tenant_id bigint not null primary key,
     name text not null,
     slug text not null unique,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null
@@ -18,11 +18,9 @@ create table if not exists public.tenant (
 create table if not exists public.tenant_connectors (
     connector_id uuid not null default gen_random_uuid() primary key,
     provider text not null default 'wati',
-
     tenant_id bigint not null references public.tenant(tenant_id),
     wati_api_url text,
     wati_api_token text,
-
     is_active boolean not null default true,
     last_successful_sync_at timestamp with time zone,
     last_error text,
@@ -35,13 +33,40 @@ create unique index if not exists uq_tenant_connectors_active_wati
     where is_active = true;
 
 
+-- ============================================================
+-- OPS — connector control plane
+-- Defined before canonical tables because canonical.contacts and
+-- canonical.messages hold a batch_id foreign key to ops.import_jobs.
+-- ============================================================
 
--- STAGING
+create table if not exists ops.import_jobs (
+    job_id uuid not null default gen_random_uuid() primary key,
+    tenant_id bigint not null references public.tenant(tenant_id),
+    job_type text not null, -- 'contact_import', 'message_backfill', etc.
+    status text not null default 'pending'
+        check (status in ('pending', 'running', 'completed', 'failed')),
+    processed_count bigint not null default 0,
+    total_count bigint,
+    subprocess_pid int,
+    error_message text,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone
+);
+
+create index if not exists idx_import_jobs_tenant_status
+    on ops.import_jobs (tenant_id, status);
+
+
+-- ============================================================
+-- STAGING — raw provider ingress
+-- ============================================================
+
 -- Contacts are latest-seen snapshots, safe to upsert.
 create table if not exists staging.contacts_raw_data (
     id uuid not null default gen_random_uuid() primary key,
     tenant_id bigint not null references public.tenant(tenant_id),
-    batch_id uuid,
+    batch_id uuid references ops.import_jobs(job_id),
     wati_contact_id text not null,
     raw_data jsonb not null,
     last_seen_at timestamp with time zone default timezone('utc'::text, now()) not null,
@@ -54,7 +79,7 @@ create table if not exists staging.contacts_raw_data (
 create table if not exists staging.messages_raw_data (
     id uuid not null default gen_random_uuid() primary key,
     tenant_id bigint not null references public.tenant(tenant_id),
-    batch_id uuid,
+    batch_id uuid references ops.import_jobs(job_id),
     wati_message_id text not null,
     conversation_id text not null,
     raw_data jsonb not null,
@@ -64,32 +89,33 @@ create table if not exists staging.messages_raw_data (
 );
 
 
+-- ============================================================
+-- CANONICAL — normalized conversation contract
+-- ============================================================
 
--- CANONICAL (silver) — normalized conversation contract
 -- One row per canonical contact identity. Provider-agnostic.
 create table if not exists canonical.contacts (
-      contact_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id BIGINT NOT NULL REFERENCES public.tenant(tenant_id),
-  batch_id UUID REFERENCES ops.import_jobs(job_id),  -- NULL for webhooks
+    contact_id uuid primary key default gen_random_uuid(),
+    tenant_id bigint not null references public.tenant(tenant_id),
+    batch_id uuid references ops.import_jobs(job_id),
 
-  -- Phone identity (canonical key for deduplication)
-  phone_normalized TEXT NOT NULL, -- e.g., "5215554146581"
-  phone_raw TEXT, -- exactly as received from Wati
+    -- Phone identity (canonical key for deduplication)
+    phone_normalized text not null, -- e.g., "5215554146581"
+    phone_raw text,
 
-  -- Profile
-  name TEXT,
-  -- Source where the contact came from
-  source TEXT,
-  wati_contact_id TEXT,
+    -- Profile
+    name text,
+    source text,
+    wati_contact_id text,
 
-  -- Merge tracking
-  is_canonical BOOLEAN DEFAULT true,
+    -- Merge tracking
+    is_canonical boolean default true,
 
-  -- Timestamps
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
+    -- Timestamps
+    created_at timestamptz default now(),
+    updated_at timestamptz default now(),
 
-  UNIQUE(tenant_id, phone_normalized)
+    unique (tenant_id, phone_normalized)
 );
 
 create index if not exists idx_canonical_contacts_tenant
@@ -115,25 +141,25 @@ create index if not exists idx_contact_provider_keys_contact
 
 -- One row per conversational unit. direction and timestamp are connector-guaranteed.
 create table if not exists canonical.messages (
-  message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id BIGINT NOT NULL REFERENCES public.tenant(tenant_id),
-  contact_id UUID NOT NULL REFERENCES canonical.contacts(contact_id),
-  batch_id UUID REFERENCES ops.import_jobs(job_id),  -- NULL for webhooks
-  conversation_id text,
+    message_id uuid primary key default gen_random_uuid(),
+    tenant_id bigint not null references public.tenant(tenant_id),
+    contact_id uuid not null references canonical.contacts(contact_id),
+    batch_id uuid references ops.import_jobs(job_id),
+    conversation_id text,
 
-  -- Message content
-  message_content TEXT,
-  direction TEXT, -- 'inbound', 'outbound'
-  message_type TEXT, -- 'text', 'image', 'template'
+    -- Message content
+    message_content text,
+    direction text, -- 'inbound', 'outbound'
+    message_type text, -- 'text', 'image', 'template'
 
-  -- External reference
-  wati_message_id TEXT,
+    -- External reference
+    wati_message_id text,
 
-  -- Timestamps
-  timestamp TIMESTAMPTZ NOT NULL, -- when message was sent/received
-  created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- Timestamps
+    timestamp timestamptz not null,
+    created_at timestamptz default now(),
 
-  UNIQUE(tenant_id, wati_message_id) -- prevent duplicate webhook processing
+    unique (tenant_id, wati_message_id)
 );
 
 create index if not exists idx_canonical_messages_contact
@@ -142,27 +168,10 @@ create index if not exists idx_canonical_messages_contact
 create index if not exists idx_canonical_messages_tenant
     on canonical.messages (tenant_id, timestamp);
 
--- ============================================================
--- OPS — connector control plane
--- ============================================================
 
-create table if not exists ops.import_jobs (
-    job_id uuid not null default gen_random_uuid() primary key,
-    tenant_id bigint not null references public.tenant(tenant_id),
-    job_type text not null, -- 'contact_import', 'message_backfill', etc.
-    status text not null default 'pending'
-        check (status in ('pending', 'running', 'completed', 'failed')),
-    processed_count bigint not null default 0,
-    total_count bigint,
-    subprocess_pid int,
-    error_message text,
-    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-    started_at timestamp with time zone,
-    completed_at timestamp with time zone
-);
-
-create index if not exists idx_import_jobs_tenant_status
-    on ops.import_jobs (tenant_id, status);
+-- ============================================================
+-- OPS (continued) — remaining control plane tables
+-- ============================================================
 
 create table if not exists ops.daemon_task_runs (
     run_id uuid not null default gen_random_uuid() primary key,

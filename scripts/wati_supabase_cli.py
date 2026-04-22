@@ -22,8 +22,16 @@ from batch_contact_import import BatchContactImport
 load_dotenv()
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
-client = SupabaseClient(supabase_url, supabase_key)
-wati_conn = WatiClient(os.getenv("WATI_ACCOUNT_ID"))
+try:
+    client = SupabaseClient(supabase_url, supabase_key)
+except Exception as e:
+    print(f"Error initializing Supabase client: {e}")
+    sys.exit(1)
+if os.getenv("WATI_ACCOUNT_ID"):
+    wati_conn = WatiClient.from_supabase(client, os.getenv("WATI_ACCOUNT_ID"))
+else:
+    print("Error: WATI_ACCOUNT_ID is not set in .env")
+    wati_conn = None
 
 @dataclass
 class StatusSnapshot:
@@ -47,9 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    setup_parser = subparsers.add_parser("setup", help="Connector install and setup helpers")
-    setup_parser.add_argument("--wati", action='store_true', help="Setting up wati credentials")
-    setup_parser.add_argument("--supabase", action='store_true', help="Setting up supabase credentials")
+    setup_parser = subparsers.add_parser("setup", help="Set up Supabase and Wati credentials in one flow")
     setup_parser.set_defaults(handler=handle_setup)
 
     test_parser = subparsers.add_parser("test-connection", help="Verify Supabase connectivity")
@@ -70,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_subparsers = sync_parser.add_subparsers(dest="sync_command", required=True)
     sync_contacts_parser = sync_subparsers.add_parser("contacts", help="Sync contacts from Wati")
     sync_contacts_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
+    sync_contacts_parser.add_argument("--limit", type=int, default=None, help="Max number of contacts to import (for testing)")
     sync_contacts_parser.set_defaults(handler=handle_sync_contacts)
 
     backfill_parser = subparsers.add_parser("backfill", help="Run connector backfill operations")
@@ -257,88 +264,107 @@ def handle_watch_status(args: argparse.Namespace) -> int:
         print("\nStopped watch.", flush=True)
         return 0
     
+def _update_env(updates: dict[str, str]) -> None:
+    """Update or add key=value pairs in the .env file."""
+    file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+
+    found = set()
+    for i, line in enumerate(lines):
+        for key, value in updates.items():
+            if line.startswith(f'{key}='):
+                lines[i] = f'{key}={value}\n'
+                found.add(key)
+
+    for key, value in updates.items():
+        if key not in found:
+            lines.append(f'{key}={value}\n')
+
+    with open(file_path, 'w') as f:
+        f.writelines(lines)
+
+
 def handle_setup(args) -> int:
-    if args.wati:
-        setup_wati_credentials()
-    if args.supabase:
-        setup_supabase_credentials()
+    # Step 1: Supabase credentials
+    print("=== Step 1: Supabase credentials ===")
+    supa_url = input("Supabase URL: ").strip()
+    supa_key = input("Supabase Key: ").strip()
+
+    _update_env({"SUPABASE_URL": supa_url, "SUPABASE_KEY": supa_key})
+    print("Saved Supabase credentials to .env\n")
+
+    # Connect to Supabase with the just-entered credentials
+    try:
+        supa_client = SupabaseClient(supa_url, supa_key)
+        db = supa_client.get_client()
+    except Exception as e:
+        print(f"Failed to connect to Supabase: {e}", file=sys.stderr, flush=True)
+        return 1
+
+    print("Supabase connection OK\n")
+
+    # Step 2: Tenant + Wati credentials
+    print("=== Step 2: Tenant & Wati credentials ===")
+    tenant_name = input("Tenant name: ").strip()
+    tenant_slug = input("Tenant slug (url-safe identifier): ").strip()
+    tenant_id_input = input("Tenant ID: ").strip()
+    wati_api_url = "https://live-server.wati.io/" + tenant_id_input
+    wati_api_token = input("Wati API Token: ").strip()
+
+    try:
+        tenant_result = (
+            db.table("tenant")
+            .insert({"name": tenant_name, "slug": tenant_slug, "tenant_id": tenant_id_input})
+            .execute()
+        )
+        tenant_id = tenant_result.data[0]["tenant_id"]
+        print(f"Tenant created: {tenant_name} (ID {tenant_id})")
+    except Exception as e:
+        print(f"Failed to create tenant: {e}", file=sys.stderr, flush=True)
+        return 1
+
+    try:
+        db.table("tenant_connectors").insert({
+            "tenant_id": tenant_id,
+            "provider": "wati",
+            "wati_api_url": wati_api_url,
+            "wati_api_token": wati_api_token,
+            "is_active": True,
+        }).execute()
+        print("Saved Wati connector to Supabase")
+    except Exception as e:
+        print(f"Failed to save connector: {e}", file=sys.stderr, flush=True)
+        return 1
+
+    _update_env({
+        "WATI_ACCOUNT_ID": tenant_id_input,
+    })
+    print("Saved Wati tenant ID to .env\n")
+
+    print("=== Setup complete ===")
+    print("Your wati url was created automatically based on your tenant id.")
+    print("Wati data was inserted into the database.")
+    print(f"Use --tenant-id {tenant_id} when running sync commands.")
     return 0
-
-def setup_wati_credentials() -> bool:
-    wati_account_id = input("Wati Account ID: ")
-    wati_api_token = input("Wati API Token: ")
-    file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-    
-    # Read existing .env file
-    with open(file_path, 'r') as f:
-        lines = f.readlines()
-    
-    # Update or add WATI_ACCOUNT_ID and WATI_API_TOKEN
-    wati_id_updated = False
-    wati_token_updated = False
-    for i, line in enumerate(lines):
-        if line.startswith('WATI_ACCOUNT_ID='):
-            lines[i] = f'WATI_ACCOUNT_ID={wati_account_id}\n'
-            wati_id_updated = True
-        elif line.startswith('WATI_API_TOKEN='):
-            lines[i] = f'WATI_API_TOKEN={wati_api_token}\n'
-            wati_token_updated = True
-    
-    # If not found, add them
-    if not wati_id_updated:
-        lines.append(f'WATI_ACCOUNT_ID={wati_account_id}\n')
-    if not wati_token_updated:
-        lines.append(f'WATI_API_TOKEN={wati_api_token}\n')
-    
-    # Write back to .env file
-    with open(file_path, 'w') as f:
-        f.writelines(lines)
-    
-    print("Updated Wati credentials")
-    return True
-
-def setup_supabase_credentials() -> bool:
-    supabase_url = input("Supabase URL: ")
-    supabase_anon_key = input("Supabase Anon Key: ")
-    file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-    
-    # Read existing .env file
-    with open(file_path, 'r') as f:
-        lines = f.readlines()
-    
-    # Update or add SUPABASE_URL and SUPABASE_ANON_KEY
-    supabase_url_updated = False
-    supabase_anon_key_updated = False
-    for i, line in enumerate(lines):
-        if line.startswith('SUPABASE_URL='):
-            lines[i] = f'SUPABASE_URL={supabase_url}\n'
-            supabase_url_updated = True
-        elif line.startswith('SUPABASE_KEY='):
-            lines[i] = f'SUPABASE_KEY={supabase_anon_key}\n'
-            supabase_anon_key_updated = True
-    
-    # If not found, add them
-    if not supabase_url_updated:
-        lines.append(f'SUPABASE_URL={supabase_url}\n')
-    if not supabase_anon_key_updated:
-        lines.append(f'SUPABASE_KEY={supabase_anon_key}\n')
-    
-    # Write back to .env file
-    with open(file_path, 'w') as f:
-        f.writelines(lines)
-    
-    print("Updated Supabase credentials")
-    return True
 
 
 def handle_sync_contacts(args: argparse.Namespace) -> int:
     try:
         importer = BatchContactImport(client, wati_conn, args.tenant_id)
-        result = importer.run()
+        result = importer.run(limit=args.limit)
         print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']} skipped={result['skipped']}", flush=True)
         return 0
     except Exception as exc:
-        print(f"Sync failed: {exc}", file=sys.stderr, flush=True)
+        msg = str(exc)
+        if "PGRST002" in msg or "schema cache" in msg:
+            print("Sync failed: Supabase schema not exposed.", file=sys.stderr, flush=True)
+        else:
+            print(f"Error: {exc}", file=sys.stderr, flush=True)
         return 1
 
 

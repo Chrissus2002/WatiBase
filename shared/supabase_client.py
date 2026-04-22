@@ -17,7 +17,7 @@ class SupabaseClient:
 
     def test_connection(self):
         try:
-            print(self.client.table('tenants').select('*').limit(1).execute())
+            print(self.client.table('tenant').select('*').limit(1).execute())
             return True
         except Exception as e:
             print(f"Connection test failed: {e}")
@@ -27,9 +27,9 @@ class SupabaseClient:
         try:
             client = self.client
             if tenant_id is None:
-                result = client.table("tenants").select("*").execute()
+                result = client.table("tenant").select("*").execute()
             else:
-                result = client.table("tenants").select("*").eq("tenant_id", tenant_id).execute()
+                result = client.table("tenant").select("*").eq("tenant_id", tenant_id).execute()
             return result
         except Exception as e:
             print(f"Failed to get tenant info: {e}")

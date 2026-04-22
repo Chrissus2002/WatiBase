@@ -17,8 +17,6 @@ class BatchContactImport:
         total = len(contacts)
         batch_size = 100
         upserted_staging = 0
-        upserted_canonical = 0
-        skipped = 0
         now = datetime.now(timezone.utc).isoformat()
 
         # Create an import job to track this batch
@@ -35,15 +33,15 @@ class BatchContactImport:
         print(f"Import job created: {batch_id}")
 
         try:
-            # Step 1 & 2: Upsert into staging.contacts_raw_data in batches of 100
+            # Step 1: Upsert raw contacts into staging in batches of 100
             for batch_start in range(0, total, batch_size):
                 batch = contacts[batch_start:batch_start + batch_size]
                 batch_end = batch_start + len(batch)
-                print(f"Importing contacts {batch_start + 1}-{batch_end} of {total}...")
+                print(f"Staging contacts {batch_start + 1}-{batch_end} of {total}...")
 
                 staging_rows = []
                 for c in batch:
-                    if c['id']:
+                    if c.get("id"):
                         staging_rows.append({
                             "tenant_id": self.db_tenant_id,
                             "batch_id": batch_id,
@@ -59,70 +57,14 @@ class BatchContactImport:
                     ).execute()
                     upserted_staging += len(staging_rows)
 
-            # Step 3 & 4: Promote each contact into canonical.contacts and contact_provider_keys
-            for c in contacts:
-                wati_id = c.get("id")
-                if not wati_id:
-                    print(f"Warning: skipping contact — no id field")
-                    skipped += 1
-                    continue
-
-                raw_phone = c.get("wAid") or c.get("phone") or c.get("whatsappNumber")
-                if not raw_phone:
-                    print(f"Warning: skipping contact id={wati_id} — no recoverable phone")
-                    skipped += 1
-                    continue
-
-                phone_normalized = re.sub(r"\D", "", str(raw_phone))
-                if not phone_normalized:
-                    print(f"Warning: skipping contact id={c.get('id')} — phone normalizes to empty string")
-                    skipped += 1
-                    continue
-
-                name = c.get("fullName") or c.get("name")
-                wati_contact_id = str(wati_id)
-
-                canonical_row = {
-                    "tenant_id": self.db_tenant_id,
-                    "batch_id": batch_id,
-                    "phone_normalized": phone_normalized,
-                    "phone_raw": str(raw_phone),
-                    "name": name,
-                    "source": "wati",
-                    "wati_contact_id": wati_contact_id,
-                    "is_canonical": True,
-                }
-
-                client.schema("canonical").table("contacts").upsert(
-                    canonical_row,
-                    on_conflict="tenant_id,phone_normalized",
-                ).execute()
-                upserted_canonical += 1
-
-                # Fetch contact_id for the just-upserted canonical contact
-                result = (
-                    client.schema("canonical")
-                    .table("contacts")
-                    .select("contact_id")
-                    .eq("tenant_id", self.db_tenant_id)
-                    .eq("phone_normalized", phone_normalized)
-                    .single()
-                    .execute()
-                )
-                contact_id = result.data["contact_id"]
-
-                provider_key_row = {
-                    "contact_id": contact_id,
-                    "tenant_id": self.db_tenant_id,
-                    "provider": "wati",
-                    "provider_contact_id": wati_contact_id,
-                    "provider_phone": str(raw_phone),
-                }
-
-                client.schema("canonical").table("contact_provider_keys").upsert(
-                    provider_key_row,
-                    on_conflict="tenant_id,provider,provider_contact_id",
-                ).execute()
+            # Step 2: Promote staged contacts to canonical via DB-side function
+            print(f"Promoting {upserted_staging} contacts to canonical...")
+            rpc_result = client.schema("public").rpc(
+                "process_contacts_to_canonical",
+                {"p_batch_id": batch_id},
+            ).execute()
+            promotion = rpc_result.data
+            upserted_canonical = promotion.get("contacts_processed", 0)
 
             # Mark job completed
             client.schema("ops").table("import_jobs").update({
@@ -144,5 +86,4 @@ class BatchContactImport:
             "total": total,
             "upserted_staging": upserted_staging,
             "upserted_canonical": upserted_canonical,
-            "skipped": skipped,
         }
