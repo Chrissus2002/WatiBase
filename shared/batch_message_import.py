@@ -13,7 +13,10 @@ class BatchMessageImport:
 
     def run(self, limit: int = None) -> dict:
         client = self.supabase_client.get_client()
-        contacts = self.wati_client.get_contacts(max_pages=limit)
+        query = client.schema("canonical").table("contacts").select("phone_raw").eq("tenant_id", self.db_tenant_id)
+        if limit:
+            query = query.limit(limit)
+        contacts = query.execute().data
         total = len(contacts)
         batch_size = 100
         upserted_staging = 0
@@ -34,9 +37,9 @@ class BatchMessageImport:
 
         try:
             for idx, contact in enumerate(contacts, 1):
-                phone = contact.get("wAid") or contact.get("phone") or contact.get("whatsappNumber")
+                phone = contact.get("phone_raw")
                 if not phone:
-                    print(f"[{idx}/{total}] Skipping contact with no phone number")
+                    print(f"[{idx}/{total}] Skipping contact with no phone_raw")
                     continue
 
                 print(f"[{idx}/{total}] Fetching messages for {phone}...")

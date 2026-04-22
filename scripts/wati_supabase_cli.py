@@ -80,12 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     sync_contacts_parser.add_argument("--limit", type=int, default=None, help="Max number of contacts to import (for testing)")
     sync_contacts_parser.set_defaults(handler=handle_sync_contacts)
 
-    backfill_parser = subparsers.add_parser("backfill", help="Run connector backfill operations")
-    backfill_subparsers = backfill_parser.add_subparsers(dest="backfill_command", required=True)
-    backfill_messages_parser = backfill_subparsers.add_parser("messages", help="Backfill historical messages")
-    backfill_messages_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
-    backfill_messages_parser.add_argument("--limit", type=int, default=None, help="Max contact pages to fetch (for testing)")
-    backfill_messages_parser.set_defaults(handler=handle_backfill_messages)
+    backfill_parser = subparsers.add_parser("backfill", help="Backfill historical messages")
+    backfill_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
+    backfill_parser.add_argument("--limit", type=int, default=None, help="Max contacts to process (for testing)")
+    backfill_parser.set_defaults(handler=handle_backfill_messages)
 
     drift_parser = subparsers.add_parser("drift", help="Exact drift and integrity checks")
     drift_subparsers = drift_parser.add_subparsers(dest="drift_command", required=True)
@@ -360,7 +358,7 @@ def handle_sync_contacts(args: argparse.Namespace) -> int:
     try:
         importer = BatchContactImport(client, wati_conn, args.tenant_id)
         result = importer.run(limit=args.limit)
-        print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']} skipped={result['skipped']}", flush=True)
+        print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']}", flush=True)
         return 0
     except Exception as exc:
         msg = str(exc)
