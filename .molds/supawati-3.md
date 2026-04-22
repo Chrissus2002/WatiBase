@@ -1,16 +1,17 @@
 <!-- molds
 id: supawati-3
-stage: build
+stage: qa
 resume_stage: 
 parent: 
 deps: 
 priority: P2
 created_at: 2026-04-21T17:47:16Z
-updated_at: 2026-04-22T18:40:52Z
+updated_at: 2026-04-22T18:49:40Z
 closed_at: 
 defer_until: 
 code_branch: 
 -->
+
 
 
 # Batch import for messages
