@@ -140,3 +140,93 @@ begin
   );
 end;
 $$ language plpgsql;
+
+
+-- Promote messages from staging.messages_raw_data into canonical.messages
+-- for a given import batch. Resolves contact_id by joining to canonical.contacts.
+-- Called via Supabase rpc('process_messages_to_canonical', {p_batch_id: '...'})
+create or replace function public.process_messages_to_canonical(p_batch_id uuid)
+returns jsonb as $$
+declare
+  v_tenant_id bigint;
+  v_messages_processed integer := 0;
+  v_messages_skipped integer := 0;
+begin
+  select distinct tenant_id into v_tenant_id
+  from staging.messages_raw_data
+  where batch_id = p_batch_id
+  limit 1;
+
+  if v_tenant_id is null then
+    raise exception 'No messages found for batch_id: %', p_batch_id;
+  end if;
+
+  raise notice 'Processing message batch % for tenant %', p_batch_id, v_tenant_id;
+
+  -- Insert messages that have a matching canonical contact.
+  -- Join on phone_normalized derived from conversation_id (the phone used to fetch).
+  -- Skip messages where no canonical contact exists.
+  with messages_to_process as (
+    select
+      s.tenant_id,
+      s.wati_message_id,
+      s.conversation_id,
+      s.raw_data,
+      c.contact_id
+    from staging.messages_raw_data s
+    join canonical.contacts c
+      on c.tenant_id = s.tenant_id
+      and c.phone_normalized = public.normalize_phone(s.conversation_id)
+    where s.batch_id = p_batch_id
+  )
+  insert into canonical.messages (
+    tenant_id,
+    contact_id,
+    batch_id,
+    conversation_id,
+    message_content,
+    direction,
+    message_type,
+    wati_message_id,
+    timestamp
+  )
+  select
+    tenant_id,
+    contact_id,
+    p_batch_id,
+    conversation_id,
+    coalesce(raw_data->>'text', raw_data->>'body') as message_content,
+    raw_data->>'type' as direction,
+    coalesce(raw_data->>'messageType', 'text') as message_type,
+    wati_message_id,
+    coalesce(
+      (raw_data->>'timestamp')::timestamptz,
+      (raw_data->>'created')::timestamptz,
+      now()
+    ) as timestamp
+  from messages_to_process
+  on conflict (tenant_id, wati_message_id) do nothing;
+
+  get diagnostics v_messages_processed = row_count;
+
+  -- Count how many staged messages had no matching contact
+  select count(*) into v_messages_skipped
+  from staging.messages_raw_data s
+  where s.batch_id = p_batch_id
+    and not exists (
+      select 1 from canonical.contacts c
+      where c.tenant_id = s.tenant_id
+        and c.phone_normalized = public.normalize_phone(s.conversation_id)
+    );
+
+  raise notice 'Complete: % messages processed, % skipped (no matching contact)',
+    v_messages_processed, v_messages_skipped;
+
+  return jsonb_build_object(
+    'batch_id', p_batch_id,
+    'tenant_id', v_tenant_id,
+    'messages_processed', v_messages_processed,
+    'messages_skipped', v_messages_skipped
+  );
+end;
+$$ language plpgsql;
