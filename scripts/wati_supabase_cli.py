@@ -18,6 +18,7 @@ from typing import Any
 from supabase_client import SupabaseClient
 from wati_client import WatiClient
 from batch_contact_import import BatchContactImport
+from batch_message_import import BatchMessageImport
 
 load_dotenv()
 supabase_url = os.getenv("SUPABASE_URL")
@@ -82,7 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser = subparsers.add_parser("backfill", help="Run connector backfill operations")
     backfill_subparsers = backfill_parser.add_subparsers(dest="backfill_command", required=True)
     backfill_messages_parser = backfill_subparsers.add_parser("messages", help="Backfill historical messages")
-    _placeholder(backfill_messages_parser, "backfill messages")
+    backfill_messages_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
+    backfill_messages_parser.add_argument("--limit", type=int, default=None, help="Max contact pages to fetch (for testing)")
+    backfill_messages_parser.set_defaults(handler=handle_backfill_messages)
 
     drift_parser = subparsers.add_parser("drift", help="Exact drift and integrity checks")
     drift_subparsers = drift_parser.add_subparsers(dest="drift_command", required=True)
@@ -363,6 +366,21 @@ def handle_sync_contacts(args: argparse.Namespace) -> int:
         msg = str(exc)
         if "PGRST002" in msg or "schema cache" in msg:
             print("Sync failed: Supabase schema not exposed.", file=sys.stderr, flush=True)
+        else:
+            print(f"Error: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+
+def handle_backfill_messages(args: argparse.Namespace) -> int:
+    try:
+        importer = BatchMessageImport(client, wati_conn, args.tenant_id)
+        result = importer.run(limit=args.limit)
+        print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']}", flush=True)
+        return 0
+    except Exception as exc:
+        msg = str(exc)
+        if "PGRST002" in msg or "schema cache" in msg:
+            print("Backfill failed: Supabase schema not exposed.", file=sys.stderr, flush=True)
         else:
             print(f"Error: {exc}", file=sys.stderr, flush=True)
         return 1
