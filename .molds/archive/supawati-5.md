@@ -1,16 +1,18 @@
 <!-- molds
 id: supawati-5
-stage: build
+stage: closed
 resume_stage: 
 parent: 
 deps: 
 priority: P2
 created_at: 2026-04-22T21:54:17Z
-updated_at: 2026-04-22T22:05:09Z
-closed_at: 
+updated_at: 2026-04-22T22:18:26Z
+closed_at: 2026-04-22T22:18:26Z
 defer_until: 
 code_branch: 
 -->
+
+
 
 
 # Backfill messages using DB contacts instead of Wati API
