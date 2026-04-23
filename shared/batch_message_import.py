@@ -1,4 +1,6 @@
 import os
+import signal
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -82,6 +84,20 @@ class BatchMessageImport:
                 "subprocess_pid": os.getpid(),
             }).eq("job_id", batch_id).execute()
             print(f"Import job created: {batch_id}")
+
+        # Register signal handler to mark job as stopped on kill
+        def _handle_signal(signum, frame):
+            sig_name = signal.Signals(signum).name
+            print(f"\nReceived {sig_name}, marking job as stopped...", flush=True)
+            client.schema("ops").table("import_jobs").update({
+                "status": "failed",
+                "error_message": f"Stopped by {sig_name}",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("job_id", batch_id).execute()
+            sys.exit(1)
+
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
 
         try:
             for idx, contact in enumerate(all_contacts, 1):
