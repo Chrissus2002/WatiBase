@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime, timezone
 
@@ -13,11 +14,34 @@ class BatchMessageImport:
 
     def run(self, limit: int = None) -> dict:
         client = self.supabase_client.get_client()
-        query = client.schema("canonical").table("contacts").select("phone_raw").eq("tenant_id", self.db_tenant_id)
-        if limit:
-            query = query.limit(limit)
-        contacts = query.execute().data
-        total = len(contacts)
+        offset = 0
+        page_size = 1000
+        all_contacts = []
+
+        pages_fetched = 0
+        while True:
+            if limit is not None and pages_fetched >= limit:
+                break
+
+            query = (client.schema("canonical")
+            .table("contacts")
+            .select("phone_raw")
+            .eq("tenant_id", self.db_tenant_id)
+            .range(offset, offset + page_size - 1)
+            .execute())
+
+            if not query.data:
+                break
+            all_contacts.extend(query.data)
+            pages_fetched += 1
+
+            if len(query.data) < page_size:
+                break
+
+            offset += page_size
+
+        total = len(all_contacts)
+        print(f"Fetched {total} contacts")
         batch_size = 100
         upserted_staging = 0
         now = datetime.now(timezone.utc).isoformat()
@@ -33,10 +57,13 @@ class BatchMessageImport:
             }).execute()
         )
         batch_id = job_result.data[0]["job_id"]
+        client.schema("ops").table("import_jobs").update({
+            "subprocess_pid": os.getpid(),
+        }).eq("job_id", batch_id).execute()
         print(f"Import job created: {batch_id}")
 
         try:
-            for idx, contact in enumerate(contacts, 1):
+            for idx, contact in enumerate(all_contacts, 1):
                 phone = contact.get("phone_raw")
                 if not phone:
                     print(f"[{idx}/{total}] Skipping contact with no phone_raw")

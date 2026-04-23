@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import os
 import sys
 import time
@@ -83,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser = subparsers.add_parser("backfill", help="Backfill historical messages")
     backfill_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
     backfill_parser.add_argument("--limit", type=int, default=None, help="Max contacts to process (for testing)")
+    backfill_parser.add_argument("--_background", action="store_true", default=False, help=argparse.SUPPRESS)
     backfill_parser.set_defaults(handler=handle_backfill_messages)
 
     drift_parser = subparsers.add_parser("drift", help="Exact drift and integrity checks")
@@ -369,19 +371,93 @@ def handle_sync_contacts(args: argparse.Namespace) -> int:
         return 1
 
 
-def handle_backfill_messages(args: argparse.Namespace) -> int:
+def _check_existing_backfill(tenant_id: int) -> dict | None:
+    """Return the running job dict if a backfill is already active for this tenant, else None."""
+    result = (
+        client.get_client().schema("ops").table("import_jobs")
+        .select("job_id, subprocess_pid")
+        .eq("tenant_id", tenant_id)
+        .eq("job_type", "message_backfill")
+        .eq("status", "running")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    if not rows:
+        return None
+
+    job = rows[0]
+    pid = job.get("subprocess_pid")
+    if not pid:
+        return None
+
     try:
-        importer = BatchMessageImport(client, wati_conn, args.tenant_id)
-        result = importer.run(limit=args.limit)
-        print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']}", flush=True)
-        return 0
-    except Exception as exc:
-        msg = str(exc)
-        if "PGRST002" in msg or "schema cache" in msg:
-            print("Backfill failed: Supabase schema not exposed.", file=sys.stderr, flush=True)
-        else:
-            print(f"Error: {exc}", file=sys.stderr, flush=True)
+        os.kill(pid, 0)
+        return job
+    except OSError:
+        # Process is dead — mark the stale job as failed
+        client.get_client().schema("ops").table("import_jobs").update({
+            "status": "failed",
+            "error_message": f"Process died unexpectedly (PID {pid} no longer running)",
+        }).eq("job_id", job["job_id"]).execute()
+        return None
+
+
+def handle_backfill_messages(args: argparse.Namespace) -> int:
+    if getattr(args, '_background', False):
+        # Child process — run synchronously
+        try:
+            importer = BatchMessageImport(client, wati_conn, args.tenant_id)
+            result = importer.run(limit=args.limit)
+            print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']}", flush=True)
+            return 0
+        except Exception as exc:
+            msg = str(exc)
+            if "PGRST002" in msg or "schema cache" in msg:
+                print("Backfill failed: Supabase schema not exposed.", file=sys.stderr, flush=True)
+            else:
+                print(f"Error: {exc}", file=sys.stderr, flush=True)
+            return 1
+
+    # Parent — check for existing running job, then spawn child
+    existing = _check_existing_backfill(args.tenant_id)
+    if existing:
+        pid = existing.get("subprocess_pid", "?")
+        print(f"Backfill already running for tenant {args.tenant_id} (PID {pid}).", flush=True)
+        print(f"Use 'kill {pid}' to stop it, or wait for it to finish.", flush=True)
         return 1
+
+    script_dir = Path(__file__).resolve().parent.parent
+    log_dir = script_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"backfill_{args.tenant_id}_{timestamp}.log"
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "backfill",
+        "--tenant-id", str(args.tenant_id),
+        "--_background",
+    ]
+    if args.limit is not None:
+        cmd.extend(["--limit", str(args.limit)])
+
+    with open(log_file, "w") as lf:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=lf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env={**os.environ, "PYTHONPATH": str(script_dir / "shared")},
+        )
+
+    print(f"Backfill started in background (PID {proc.pid}).", flush=True)
+    print(f"Log: {log_file}", flush=True)
+    print(f"Monitor: wati-supabase status --tenant-id {args.tenant_id}", flush=True)
+    print(f"Stop:    kill {proc.pid}", flush=True)
+    return 0
 
 
 def handle_to_file_contacts(args: argparse.Namespace) -> int:
