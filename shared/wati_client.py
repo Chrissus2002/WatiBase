@@ -87,9 +87,10 @@ class WatiClient:
                 data = response.json()
                 if phone_number not in all_messages:
                     all_messages[phone_number] = []
-                all_messages[phone_number].extend((data.get("messages")).get("items") or [])
+                items = (data.get("messages") or {}).get("items") or []
+                all_messages[phone_number].extend(items)
 
-                if len(data.get("messages", [])) < page_size:
+                if len(items) < page_size:
                     break
                 page_number += 1
             

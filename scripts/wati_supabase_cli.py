@@ -29,21 +29,19 @@ try:
 except Exception as e:
     print(f"Error initializing Supabase client: {e}")
     sys.exit(1)
-if os.getenv("WATI_ACCOUNT_ID"):
-    wati_conn = WatiClient.from_supabase(client, os.getenv("WATI_ACCOUNT_ID"))
-else:
-    print("Error: WATI_ACCOUNT_ID is not set in .env")
-    wati_conn = None
+def get_wati_client(tenant_id: int) -> WatiClient:
+    """Create a WatiClient from DB credentials for the given tenant."""
+    return WatiClient.from_supabase(client, tenant_id)
 
 @dataclass
 class StatusSnapshot:
+    supabase_url: str
+    supabase_key: str
     tenant_id: int
     tenant_name: str
     tenant_slug: str | None
-    wati_api_configured: bool
-    wati_phone_number: str | None
-    drift_run: dict[str, Any] | None
-    active_job: dict[str, Any] | None
+    wati_api_url: str | None
+    wati_api_token: str | None
 
 
 def _placeholder(parser: argparse.ArgumentParser, command_path: str) -> None:
@@ -88,11 +86,6 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--_background", action="store_true", default=False, help=argparse.SUPPRESS)
     backfill_parser.set_defaults(handler=handle_backfill_messages)
 
-    drift_parser = subparsers.add_parser("drift", help="Exact drift and integrity checks")
-    drift_subparsers = drift_parser.add_subparsers(dest="drift_command", required=True)
-    drift_check_parser = drift_subparsers.add_parser("check", help="Run an exact drift check")
-    _placeholder(drift_check_parser, "drift check")
-
     logs_parser = subparsers.add_parser("logs", help="Inspect connector logs")
     _placeholder(logs_parser, "logs")
 
@@ -108,10 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
     to_file_subparsers = to_file_parser.add_subparsers(dest="to_file_command", required=True)
 
     to_file_contacts_parser = to_file_subparsers.add_parser("contacts", help="Download all contacts to a JSON file")
+    to_file_contacts_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
     to_file_contacts_parser.add_argument("--output", default="contacts.json", help="Output file path (default: contacts.json)")
     to_file_contacts_parser.set_defaults(handler=handle_to_file_contacts)
 
     to_file_messages_parser = to_file_subparsers.add_parser("messages", help="Download messages to local JSON files")
+    to_file_messages_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
     to_file_messages_group = to_file_messages_parser.add_mutually_exclusive_group(required=True)
     to_file_messages_group.add_argument("--phone", help="Phone number of a single contact")
     to_file_messages_group.add_argument("--all", action="store_true", help="Download messages for all contacts")
@@ -149,7 +144,7 @@ def handle_test_connection(args: argparse.Namespace) -> int:
 def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
     tenant_response = (
         client.get_client().table("tenant")
-        .select("tenant_id, name, slug, wati_api_token, wati_phone_number")
+        .select("tenant_id, name, slug")
         .eq("tenant_id", tenant_id)
         .limit(1)
         .execute()
@@ -160,82 +155,43 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
 
     tenant = tenant_rows[0]
 
-    drift_response = (
-        client.get_client().schema("ops").table("daemon_task_runs")
-        .select("status, started_at, finished_at, result, error_message, notes")
+    connector_response = (
+        client.get_client().table("tenant_connectors")
+        .select("wati_api_url, wati_api_token")
         .eq("tenant_id", tenant_id)
-        .eq("task_name", "exact_contact_drift")
-        .order("started_at", desc=True)
+        .eq("provider", "wati")
+        .eq("is_active", True)
         .limit(1)
         .execute()
     )
-    drift_rows = drift_response.data or []
-
-    active_job_response = (
-        client.get_client().schema("ops").table("import_jobs")
-        .select(
-            "job_id, status, created_at, completed_at, processed_messages, "
-            "total_messages, subprocess_pid"
-        )
-        .eq("tenant_id", tenant_id)
-        .in_("status", ["pending", "running"])
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    active_job_rows = active_job_response.data or []
+    connector_rows = connector_response.data or []
+    connector = connector_rows[0] if connector_rows else {}
 
     return StatusSnapshot(
+        supabase_url=supabase_url,
+        supabase_key=supabase_key,
         tenant_id=tenant["tenant_id"],
         tenant_name=tenant.get("name") or f"Tenant {tenant_id}",
         tenant_slug=tenant.get("slug"),
-        wati_api_configured=bool(tenant.get("wati_api_token")),
-        wati_phone_number=tenant.get("wati_phone_number"),
-        drift_run=drift_rows[0] if drift_rows else None,
-        active_job=active_job_rows[0] if active_job_rows else None,
+        wati_api_url=connector.get("wati_api_url"),
+        wati_api_token=connector.get("wati_api_token"),
     )
 
 
 def format_status(snapshot: StatusSnapshot) -> str:
     lines: list[str] = []
-    lines.append(f"Tenant: {snapshot.tenant_name} ({snapshot.tenant_id})")
-    lines.append(f"Slug: {snapshot.tenant_slug or '-'}")
-    lines.append(f"Wati token: {'configured' if snapshot.wati_api_configured else 'missing'}")
-    lines.append(f"Business phone: {snapshot.wati_phone_number or '-'}")
+    lines.append("Supabase")
+    lines.append(f"  URL:   {snapshot.supabase_url}")
+    lines.append(f"  Key:   {snapshot.supabase_key}")
     lines.append("")
-
-    if snapshot.drift_run is None:
-        lines.append("Exact drift: not run yet")
-    else:
-        drift = snapshot.drift_run
-        result = drift.get("result") or {}
-        lines.append(
-            f"Exact drift: {drift.get('status', 'unknown')}"
-            f" (started {drift.get('started_at') or '-'})"
-        )
-        if result:
-            lines.append(f"  Wati distinct: {result.get('wati_distinct_contact_count', 0):,}")
-            lines.append(f"  DB: {result.get('db_contact_count', 0):,}")
-            lines.append(f"  Wati-only: {result.get('wati_only_count', 0):,}")
-            lines.append(f"  DB-only: {result.get('db_only_count', 0):,}")
-            lines.append(f"  Exact match: {str(result.get('exact_match', False)).lower()}")
-        elif drift.get("error_message"):
-            lines.append(f"  Error: {drift['error_message']}")
-        elif drift.get("notes"):
-            lines.append(f"  {drift['notes']}")
-
+    lines.append("Tenant")
+    lines.append(f"  ID:    {snapshot.tenant_id}")
+    lines.append(f"  Name:  {snapshot.tenant_name}")
+    lines.append(f"  Slug:  {snapshot.tenant_slug or '-'}")
     lines.append("")
-    if snapshot.active_job is None:
-        lines.append("Active import job: none")
-    else:
-        job = snapshot.active_job
-        lines.append(
-            f"Active import job: {job.get('status', 'unknown')}"
-            f" ({job.get('processed_messages', 0):,}/{job.get('total_messages', 0):,})"
-        )
-        lines.append(f"Job ID: {job.get('job_id')}")
-        lines.append(f"Started: {job.get('created_at') or '-'}")
-        lines.append(f"PID: {job.get('subprocess_pid') or '-'}")
+    lines.append("Wati Connector")
+    lines.append(f"  URL:   {snapshot.wati_api_url or 'not configured'}")
+    lines.append(f"  Token: {snapshot.wati_api_token or 'not configured'}")
 
     return "\n".join(lines) + "\n"
 
@@ -359,7 +315,8 @@ def handle_setup(args) -> int:
 
 def handle_sync_contacts(args: argparse.Namespace) -> int:
     try:
-        importer = BatchContactImport(client, wati_conn, args.tenant_id)
+        wati = get_wati_client(args.tenant_id)
+        importer = BatchContactImport(client, wati, args.tenant_id)
         result = importer.run(limit=args.limit)
         print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']}", flush=True)
         return 0
@@ -411,7 +368,8 @@ def handle_backfill_messages(args: argparse.Namespace) -> int:
     if getattr(args, '_background', False):
         # Child process — run synchronously
         try:
-            importer = BatchMessageImport(client, wati_conn, args.tenant_id)
+            wati = get_wati_client(args.tenant_id)
+            importer = BatchMessageImport(client, wati, args.tenant_id)
             result = importer.run(limit=args.limit, resume_job_id=resume_job_id)
             print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']} skipped={result['skipped']}", flush=True)
             return 0
@@ -469,7 +427,8 @@ def handle_backfill_messages(args: argparse.Namespace) -> int:
 
 def handle_to_file_contacts(args: argparse.Namespace) -> int:
     try:
-        contacts = wati_conn.get_contacts()
+        wati = get_wati_client(args.tenant_id)
+        contacts = wati.get_contacts()
     except Exception as exc:
         print(f"Failed to fetch contacts: {exc}", file=sys.stderr, flush=True)
         return 1
@@ -481,9 +440,10 @@ def handle_to_file_contacts(args: argparse.Namespace) -> int:
 
 
 def handle_to_file_messages(args: argparse.Namespace) -> int:
+    wati = get_wati_client(args.tenant_id)
     if args.phone:
         try:
-            result = wati_conn.get_messages(args.phone)
+            result = wati.get_messages(args.phone)
         except Exception as exc:
             print(f"Failed to fetch messages: {exc}", file=sys.stderr, flush=True)
             return 1
@@ -496,7 +456,7 @@ def handle_to_file_messages(args: argparse.Namespace) -> int:
 
     # --all: fetch contacts first, then messages per contact
     try:
-        contacts = wati_conn.get_contacts()
+        contacts = wati.get_contacts()
     except Exception as exc:
         print(f"Failed to fetch contacts: {exc}", file=sys.stderr, flush=True)
         return 1
@@ -511,7 +471,7 @@ def handle_to_file_messages(args: argparse.Namespace) -> int:
             continue
         print(f"[{i}/{len(contacts)}] Fetching messages for {phone}", flush=True)
         try:
-            result = wati_conn.get_messages(phone)
+            result = wati.get_messages(phone)
             messages = result.get(phone, [])
         except Exception as exc:
             print(f"  Error fetching messages for {phone}: {exc}", flush=True)
