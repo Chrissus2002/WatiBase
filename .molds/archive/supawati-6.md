@@ -1,16 +1,18 @@
 <!-- molds
 id: supawati-6
-stage: build
+stage: closed
 resume_stage: 
 parent: 
 deps: 
 priority: P2
 created_at: 2026-04-22T23:14:49Z
-updated_at: 2026-04-22T23:55:00Z
-closed_at: 
+updated_at: 2026-04-23T00:04:24Z
+closed_at: 2026-04-23T00:04:24Z
 defer_until: 
 code_branch: 
 -->
+
+
 
 
 # Run backfill messages in background process
