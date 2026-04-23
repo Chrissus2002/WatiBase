@@ -87,17 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser.set_defaults(handler=handle_backfill_messages)
 
     logs_parser = subparsers.add_parser("logs", help="Inspect connector logs")
+    logs_parser.add_argument("--list", action="store_true", help="List log files with copy-pasteable commands")
     logs_parser.add_argument("--file", default=None, help="Display a specific log file")
     logs_parser.add_argument("--tail", action="store_true", help="Show only the last 50 lines (use with --file)")
     logs_parser.set_defaults(handler=handle_logs)
-
-    doctor_parser = subparsers.add_parser("doctor", help="Run connector health checks")
-    doctor_parser.set_defaults(handler=handle_test_connection)
-
-    daemon_parser = subparsers.add_parser("daemon", help="Control the connector daemon")
-    daemon_subparsers = daemon_parser.add_subparsers(dest="daemon_command", required=True)
-    daemon_run_parser = daemon_subparsers.add_parser("run", help="Run the daemon loop")
-    _placeholder(daemon_run_parser, "daemon run")
 
     to_file_parser = subparsers.add_parser("to-file", help="Download Wati data to local files")
     to_file_subparsers = to_file_parser.add_subparsers(dest="to_file_command", required=True)
@@ -520,10 +513,11 @@ def handle_logs(args: argparse.Namespace) -> int:
         print("No log files found.", flush=True)
         return 0
 
-    print("Log files (newest first):", flush=True)
-    for f in log_files:
-        size = _format_size(f.stat().st_size)
-        print(f"  {f.name}  ({size})")
+    if args.list:
+        print("Log files (newest first):", flush=True)
+        for f in log_files:
+            size = _format_size(f.stat().st_size)
+            print(f"  {f.name}  ({size})")
     return 0
 
 
