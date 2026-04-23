@@ -1,6 +1,6 @@
 <!-- molds
 id: dialo-8
-stage: wontdo
+stage: closed
 resume_stage:
 parent:
 deps: dialo-6
