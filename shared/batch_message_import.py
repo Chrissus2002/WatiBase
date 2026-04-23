@@ -12,7 +12,7 @@ class BatchMessageImport:
         self.wati_client = wati_client
         self.db_tenant_id = db_tenant_id
 
-    def run(self, limit: int = None) -> dict:
+    def run(self, limit: int = None, resume_job_id: str = None) -> dict:
         client = self.supabase_client.get_client()
         offset = 0
         page_size = 1000
@@ -44,29 +44,55 @@ class BatchMessageImport:
         print(f"Fetched {total} contacts")
         batch_size = 100
         upserted_staging = 0
+        skipped = 0
         now = datetime.now(timezone.utc).isoformat()
 
-        # Create an import job to track this batch
-        job_result = (
-            client.schema("ops").table("import_jobs").insert({
-                "tenant_id": self.db_tenant_id,
-                "job_type": "message_backfill",
+        if resume_job_id:
+            # Reuse existing job
+            batch_id = resume_job_id
+            client.schema("ops").table("import_jobs").update({
                 "status": "running",
+                "error_message": None,
                 "total_count": total,
-                "started_at": now,
-            }).execute()
-        )
-        batch_id = job_result.data[0]["job_id"]
-        client.schema("ops").table("import_jobs").update({
-            "subprocess_pid": os.getpid(),
-        }).eq("job_id", batch_id).execute()
-        print(f"Import job created: {batch_id}")
+                "subprocess_pid": os.getpid(),
+            }).eq("job_id", batch_id).execute()
+            print(f"Resuming import job: {batch_id}")
+        else:
+            # Create a new import job
+            job_result = (
+                client.schema("ops").table("import_jobs").insert({
+                    "tenant_id": self.db_tenant_id,
+                    "job_type": "message_backfill",
+                    "status": "running",
+                    "total_count": total,
+                    "started_at": now,
+                }).execute()
+            )
+            batch_id = job_result.data[0]["job_id"]
+            client.schema("ops").table("import_jobs").update({
+                "subprocess_pid": os.getpid(),
+            }).eq("job_id", batch_id).execute()
+            print(f"Import job created: {batch_id}")
 
         try:
             for idx, contact in enumerate(all_contacts, 1):
                 phone = contact.get("phone_raw")
                 if not phone:
-                    print(f"[{idx}/{total}] Skipping contact with no phone_raw",flush=True)
+                    print(f"[{idx}/{total}] Skipping contact with no phone_raw", flush=True)
+                    continue
+
+                # Check if this contact already has messages staged
+                exists = (
+                    client.schema("staging").table("messages_raw_data")
+                    .select("id", count="exact")
+                    .eq("tenant_id", self.db_tenant_id)
+                    .eq("conversation_id", phone)
+                    .limit(1)
+                    .execute()
+                )
+                if exists.count > 0:
+                    print(f"[{idx}/{total}] Skipping {phone} — already staged", flush=True)
+                    skipped += 1
                     continue
 
                 print(f"[{idx}/{total}] Fetching messages for {phone}...", flush=True)
@@ -90,7 +116,7 @@ class BatchMessageImport:
                             "tenant_id": self.db_tenant_id,
                             "batch_id": batch_id,
                             "wati_message_id": str(msg_id),
-                            "conversation_id": msg.get("conversationId"),
+                            "conversation_id": msg.get("conversationId") or str(phone),
                             "raw_data": msg,
                         })
 
@@ -137,4 +163,5 @@ class BatchMessageImport:
             "total": total,
             "upserted_staging": upserted_staging,
             "upserted_canonical": upserted_canonical,
+            "skipped": skipped,
         }

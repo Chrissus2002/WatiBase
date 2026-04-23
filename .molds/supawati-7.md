@@ -77,10 +77,10 @@ This skip logic runs on every backfill (not just `--resume`), since re-staging c
 No change needed. When a process dies, it marks the job `failed`. When the user runs `--resume <job_id>`, they're explicitly picking up that failed job. The resume path bypasses `_check_existing_backfill` because the user already knows which job they want.
 
 ## Files to Modify
-| File | Action | Purpose |
-|------|--------|---------|
-| `shared/batch_message_import.py` | Modify | Add `resume_job_id` param, reuse existing job when set, add skip-check before each contact |
-| `scripts/wati_supabase_cli.py` | Modify | Add `--resume` arg to `backfill` parser, forward to child process and `BatchMessageImport` |
+| File | Action | Purpose | Done |
+|------|--------|---------|------|
+| `shared/batch_message_import.py` | Modify | Add `resume_job_id` param, reuse existing job when set, add skip-check before each contact | yes |
+| `scripts/wati_supabase_cli.py` | Modify | Add `--resume` arg to `backfill` parser, forward to child process and `BatchMessageImport` | yes |
 
 ## Verification
 
