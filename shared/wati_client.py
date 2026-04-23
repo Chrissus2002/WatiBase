@@ -77,7 +77,6 @@ class WatiClient:
         page_number = 1
 
         with requests.Session() as session:
-            print(f"Fetching messages for tenant {self.tenant_id} where the phone number is {phone_number}")
             session.headers.update(self.headers)
 
             while True:
@@ -88,7 +87,7 @@ class WatiClient:
                 data = response.json()
                 if phone_number not in all_messages:
                     all_messages[phone_number] = []
-                all_messages[phone_number].extend(data.get("messages") or [])
+                all_messages[phone_number].extend((data.get("messages")).get("items") or [])
 
                 if len(data.get("messages", [])) < page_size:
                     break

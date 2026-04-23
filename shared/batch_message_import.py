@@ -66,15 +66,15 @@ class BatchMessageImport:
             for idx, contact in enumerate(all_contacts, 1):
                 phone = contact.get("phone_raw")
                 if not phone:
-                    print(f"[{idx}/{total}] Skipping contact with no phone_raw")
+                    print(f"[{idx}/{total}] Skipping contact with no phone_raw",flush=True)
                     continue
 
-                print(f"[{idx}/{total}] Fetching messages for {phone}...")
+                print(f"[{idx}/{total}] Fetching messages for {phone}...", flush=True)
                 try:
                     result = self.wati_client.get_messages(phone)
                     messages = result.get(phone, [])
                 except Exception as exc:
-                    print(f"  Error fetching messages for {phone}: {exc}")
+                    print(f"  Error fetching messages for {phone}: {exc}", flush=True)
                     continue
 
                 # Upsert messages into staging in batches of 100
@@ -90,7 +90,7 @@ class BatchMessageImport:
                             "tenant_id": self.db_tenant_id,
                             "batch_id": batch_id,
                             "wati_message_id": str(msg_id),
-                            "conversation_id": msg.get("conversationId") or str(phone),
+                            "conversation_id": msg.get("conversationId"),
                             "raw_data": msg,
                         })
 
