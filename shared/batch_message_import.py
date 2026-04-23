@@ -44,6 +44,9 @@ class BatchMessageImport:
             offset += page_size
 
         total = len(all_contacts)
+        if total == 0:
+            print("No contacts found. Run 'sync contacts' first.")
+            return {"batch_id": None, "total": 0, "upserted_staging": 0, "upserted_canonical": 0}
         print(f"Fetched {total} contacts")
         batch_size = 100
         upserted_staging = 0

@@ -87,7 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser.set_defaults(handler=handle_backfill_messages)
 
     logs_parser = subparsers.add_parser("logs", help="Inspect connector logs")
-    _placeholder(logs_parser, "logs")
+    logs_parser.add_argument("--file", default=None, help="Display a specific log file")
+    logs_parser.add_argument("--tail", action="store_true", help="Show only the last 50 lines (use with --file)")
+    logs_parser.set_defaults(handler=handle_logs)
 
     doctor_parser = subparsers.add_parser("doctor", help="Run connector health checks")
     doctor_parser.set_defaults(handler=handle_test_connection)
@@ -481,6 +483,47 @@ def handle_to_file_messages(args: argparse.Namespace) -> int:
         file_path.write_text(json.dumps(messages, indent=2))
 
     print(f"Done. Files written to {output_dir}/", flush=True)
+    return 0
+
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes >= 1_048_576:
+        return f"{size_bytes / 1_048_576:.1f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
+
+
+def handle_logs(args: argparse.Namespace) -> int:
+    log_dir = Path(__file__).resolve().parent.parent / "logs"
+
+    if not log_dir.exists():
+        print("No log files found.", flush=True)
+        return 0
+
+    if args.file:
+        log_path = log_dir / args.file
+        if not log_path.exists():
+            print(f"Log file not found: {args.file}", file=sys.stderr, flush=True)
+            return 1
+        content = log_path.read_text()
+        if args.tail:
+            lines = content.splitlines()
+            for line in lines[-50:]:
+                print(line)
+        else:
+            print(content, end="")
+        return 0
+
+    log_files = sorted(log_dir.glob("*.log"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not log_files:
+        print("No log files found.", flush=True)
+        return 0
+
+    print("Log files (newest first):", flush=True)
+    for f in log_files:
+        size = _format_size(f.stat().st_size)
+        print(f"  {f.name}  ({size})")
     return 0
 
 
