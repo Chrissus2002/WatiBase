@@ -27,6 +27,7 @@ class BatchMessageImport:
             .table("contacts")
             .select("phone_raw")
             .eq("tenant_id", self.db_tenant_id)
+            .order("phone_normalized")
             .range(offset, offset + page_size - 1)
             .execute())
 
@@ -44,19 +45,27 @@ class BatchMessageImport:
         print(f"Fetched {total} contacts")
         batch_size = 100
         upserted_staging = 0
-        skipped = 0
         now = datetime.now(timezone.utc).isoformat()
+        start_from = 0
 
         if resume_job_id:
-            # Reuse existing job
+            # Reuse existing job — read processed_count to know where to resume
             batch_id = resume_job_id
+            job_row = (
+                client.schema("ops").table("import_jobs")
+                .select("processed_count")
+                .eq("job_id", batch_id)
+                .single()
+                .execute()
+            )
+            start_from = job_row.data.get("processed_count") or 0
             client.schema("ops").table("import_jobs").update({
                 "status": "running",
                 "error_message": None,
                 "total_count": total,
                 "subprocess_pid": os.getpid(),
             }).eq("job_id", batch_id).execute()
-            print(f"Resuming import job: {batch_id}")
+            print(f"Resuming import job: {batch_id} from contact {start_from + 1}")
         else:
             # Create a new import job
             job_result = (
@@ -76,23 +85,13 @@ class BatchMessageImport:
 
         try:
             for idx, contact in enumerate(all_contacts, 1):
+                # Skip contacts already processed in a previous run
+                if idx <= start_from:
+                    continue
+
                 phone = contact.get("phone_raw")
                 if not phone:
                     print(f"[{idx}/{total}] Skipping contact with no phone_raw", flush=True)
-                    continue
-
-                # Check if this contact already has messages staged
-                exists = (
-                    client.schema("staging").table("messages_raw_data")
-                    .select("id", count="exact")
-                    .eq("tenant_id", self.db_tenant_id)
-                    .eq("conversation_id", phone)
-                    .limit(1)
-                    .execute()
-                )
-                if exists.count > 0:
-                    print(f"[{idx}/{total}] Skipping {phone} — already staged", flush=True)
-                    skipped += 1
                     continue
 
                 print(f"[{idx}/{total}] Fetching messages for {phone}...", flush=True)
@@ -127,7 +126,7 @@ class BatchMessageImport:
                         ).execute()
                         upserted_staging += len(staging_rows)
 
-                # Update progress after each contact
+                # Update progress after each contact (absolute index)
                 client.schema("ops").table("import_jobs").update({
                     "processed_count": idx,
                 }).eq("job_id", batch_id).execute()
@@ -146,7 +145,7 @@ class BatchMessageImport:
             # Mark job completed
             client.schema("ops").table("import_jobs").update({
                 "status": "completed",
-                "processed_count": upserted_canonical,
+                "processed_count": total,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }).eq("job_id", batch_id).execute()
 
@@ -163,5 +162,5 @@ class BatchMessageImport:
             "total": total,
             "upserted_staging": upserted_staging,
             "upserted_canonical": upserted_canonical,
-            "skipped": skipped,
+            "skipped": start_from,
         }
