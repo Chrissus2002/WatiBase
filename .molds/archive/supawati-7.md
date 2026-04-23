@@ -1,13 +1,13 @@
 <!-- molds
 id: supawati-7
-stage: qa
+stage: closed
 resume_stage:
 parent:
 deps:
 priority: P2
 created_at: 2026-04-22T23:53:47Z
 updated_at: 2026-04-22T23:53:47Z
-closed_at:
+closed_at: 2026-04-23T15:56:51Z
 defer_until:
 code_branch:
 -->
