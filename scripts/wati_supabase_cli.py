@@ -356,6 +356,7 @@ def handle_sync_contacts(args: argparse.Namespace) -> int:
         msg = str(exc)
         if "PGRST002" in msg or "schema cache" in msg:
             print("Sync failed: Supabase schema not exposed.", file=sys.stderr, flush=True)
+            print(msg)
         else:
             print(f"Error: {exc}", file=sys.stderr, flush=True)
         return 1

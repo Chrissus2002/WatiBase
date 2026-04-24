@@ -109,13 +109,24 @@ class BatchContactImport:
     def _enrich_identity_fields(self, client, batch_id: str) -> None:
         default_region = self._load_default_phone_region(client)
 
-        # Load staged contacts for this batch
-        staged = (
-            client.schema("staging").table("contacts_raw_data")
-            .select("wati_contact_id, raw_data")
-            .eq("batch_id", batch_id)
-            .execute()
-        ).data or []
+        # Load all staged contacts for this batch, paginating past the 1000-row limit
+        staged = []
+        page_size = 1000
+        offset = 0
+        while True:
+            page = (
+                client.schema("staging").table("contacts_raw_data")
+                .select("wati_contact_id, raw_data")
+                .eq("batch_id", batch_id)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            ).data or []
+            if not page:
+                break
+            staged.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
 
         if not staged:
             return
