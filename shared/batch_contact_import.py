@@ -1,4 +1,3 @@
-import re
 from datetime import datetime, timezone
 
 from phone_identity import build_phone_identity
