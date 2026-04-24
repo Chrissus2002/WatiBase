@@ -60,6 +60,7 @@ class StatusSnapshot:
     tenant_slug: str | None
     wati_api_url: str | None
     wati_api_token: str | None
+    default_phone_region: str | None
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -168,7 +169,7 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
 
     connector_response = (
         db_client.get_client().table("tenant_connectors")
-        .select("wati_api_url, wati_api_token")
+        .select("wati_api_url, wati_api_token, default_phone_region")
         .eq("tenant_id", tenant_id)
         .eq("provider", "wati")
         .eq("is_active", True)
@@ -186,6 +187,7 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
         tenant_slug=tenant.get("slug"),
         wati_api_url=connector.get("wati_api_url"),
         wati_api_token=connector.get("wati_api_token"),
+        default_phone_region=connector.get("default_phone_region"),
     )
 
 
@@ -209,8 +211,9 @@ def format_status(snapshot: StatusSnapshot) -> str:
     lines.append(f"  Slug:  {snapshot.tenant_slug or '-'}")
     lines.append("")
     lines.append("Wati Connector")
-    lines.append(f"  URL:   {snapshot.wati_api_url or 'not configured'}")
-    lines.append(f"  Token: {mask_secret(snapshot.wati_api_token)}")
+    lines.append(f"  URL:    {snapshot.wati_api_url or 'not configured'}")
+    lines.append(f"  Token:  {mask_secret(snapshot.wati_api_token)}")
+    lines.append(f"  Region: {snapshot.default_phone_region or 'not set'}")
 
     return "\n".join(lines) + "\n"
 
@@ -295,6 +298,10 @@ def handle_setup(args) -> int:
     default_wati_api_url = f"https://live-mt-server.wati.io/{tenant_id_input}"
     wati_api_url = input(f"Wati API Endpoint URL [{default_wati_api_url}]: ").strip() or default_wati_api_url
     wati_api_token = input("Wati API Token: ").strip()
+    default_phone_region = input("Default phone region (ISO alpha-2, e.g. MX, US) [optional]: ").strip().upper() or None
+    if default_phone_region and (len(default_phone_region) != 2 or not default_phone_region.isalpha()):
+        print("Invalid region code. Must be a 2-letter ISO alpha-2 code (e.g. MX, US, GB).", file=sys.stderr)
+        return 1
 
     try:
         tenant_result = (
@@ -308,14 +315,18 @@ def handle_setup(args) -> int:
         print(f"Failed to create tenant: {e}", file=sys.stderr, flush=True)
         return 1
 
+    connector_row = {
+        "tenant_id": tenant_id,
+        "provider": "wati",
+        "wati_api_url": wati_api_url,
+        "wati_api_token": wati_api_token,
+        "is_active": True,
+    }
+    if default_phone_region:
+        connector_row["default_phone_region"] = default_phone_region
+
     try:
-        db.table("tenant_connectors").insert({
-            "tenant_id": tenant_id,
-            "provider": "wati",
-            "wati_api_url": wati_api_url,
-            "wati_api_token": wati_api_token,
-            "is_active": True,
-        }).execute()
+        db.table("tenant_connectors").insert(connector_row).execute()
         print("Saved Wati connector to Supabase")
     except Exception as e:
         print(f"Failed to save connector: {e}", file=sys.stderr, flush=True)

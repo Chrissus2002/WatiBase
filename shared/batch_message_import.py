@@ -27,7 +27,7 @@ class BatchMessageImport:
 
             query = (client.schema("canonical")
             .table("contacts")
-            .select("phone_raw")
+            .select("phone_raw, wati_lookup_phone")
             .eq("tenant_id", self.db_tenant_id)
             .order("phone_normalized")
             .range(offset, offset + page_size - 1)
@@ -108,9 +108,9 @@ class BatchMessageImport:
                 if idx <= start_from:
                     continue
 
-                phone = contact.get("phone_raw")
+                phone = contact.get("wati_lookup_phone") or contact.get("phone_raw")
                 if not phone:
-                    print(f"[{idx}/{total}] Skipping contact with no phone_raw", flush=True)
+                    print(f"[{idx}/{total}] Skipping contact with no phone", flush=True)
                     continue
 
                 print(f"[{idx}/{total}] Fetching messages for {phone}...", flush=True)

@@ -1,0 +1,5 @@
+phonenumbers>=8.13,<9
+python-dotenv>=1.0,<2
+requests>=2.31,<3
+supabase>=2.0,<3
+pytest>=8.0,<9

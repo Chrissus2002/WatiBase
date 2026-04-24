@@ -21,6 +21,7 @@ create table if not exists public.tenant_connectors (
     tenant_id bigint not null references public.tenant(tenant_id),
     wati_api_url text,
     wati_api_token text,
+    default_phone_region text check (default_phone_region ~ '^[A-Z]{2}$'),
     is_active boolean not null default true,
     last_successful_sync_at timestamp with time zone,
     last_error text,
@@ -100,8 +101,16 @@ create table if not exists canonical.contacts (
     batch_id uuid references ops.import_jobs(job_id),
 
     -- Phone identity (canonical key for deduplication)
-    phone_normalized text not null, -- e.g., "5215554146581"
+    phone_normalized text not null, -- legacy Wati-compatible lookup key
     phone_raw text,
+
+    -- Smart identity fields (populated by Python enrichment pass)
+    phone_raw_primary text,
+    phone_identity_key text,
+    phone_e164 text,
+    normalization_status text,
+    normalization_region text,
+    wati_lookup_phone text,
 
     -- Profile
     name text,
@@ -121,6 +130,18 @@ create table if not exists canonical.contacts (
 create index if not exists idx_canonical_contacts_tenant
     on canonical.contacts (tenant_id);
 
+create index if not exists idx_canonical_contacts_identity_key
+    on canonical.contacts (tenant_id, phone_identity_key)
+    where phone_identity_key is not null;
+
+create index if not exists idx_canonical_contacts_e164
+    on canonical.contacts (tenant_id, phone_e164)
+    where phone_e164 is not null;
+
+create index if not exists idx_canonical_contacts_wati_lookup
+    on canonical.contacts (tenant_id, wati_lookup_phone)
+    where wati_lookup_phone is not null;
+
 -- Maps Wati provider identities to canonical contacts.
 -- Provider-specific fields live here, not on canonical.contacts.
 create table if not exists canonical.contact_provider_keys (
@@ -130,6 +151,9 @@ create table if not exists canonical.contact_provider_keys (
     provider text not null default 'wati',
     provider_contact_id text not null,
     provider_phone text,
+    is_primary boolean not null default true,
+    first_seen_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    last_seen_at timestamp with time zone default timezone('utc'::text, now()) not null,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
 

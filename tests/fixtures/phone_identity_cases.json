@@ -1,0 +1,139 @@
+[
+  {
+    "name": "mx_wati_mobile_variant",
+    "raw_input": "5218123456789",
+    "default_region": "MX",
+    "wati_contact_id": "mx-1",
+    "equivalent_group": "mx_monterrey",
+    "expected": {
+      "phone_e164": "+528123456789",
+      "phone_identity_key": "e164:+528123456789",
+      "normalization_status": "assumed_region",
+      "normalization_region": "MX",
+      "wati_lookup_phone": "5218123456789"
+    }
+  },
+  {
+    "name": "mx_plain_international_digits",
+    "raw_input": "528123456789",
+    "default_region": null,
+    "wati_contact_id": "mx-2",
+    "equivalent_group": "mx_monterrey",
+    "expected": {
+      "phone_e164": "+528123456789",
+      "phone_identity_key": "e164:+528123456789",
+      "normalization_status": "e164",
+      "normalization_region": "MX",
+      "wati_lookup_phone": "5218123456789"
+    }
+  },
+  {
+    "name": "mx_plus_format",
+    "raw_input": "+52 81 2345 6789",
+    "default_region": null,
+    "wati_contact_id": "mx-3",
+    "equivalent_group": "mx_monterrey",
+    "expected": {
+      "phone_e164": "+528123456789",
+      "phone_identity_key": "e164:+528123456789",
+      "normalization_status": "e164",
+      "normalization_region": "MX",
+      "wati_lookup_phone": "5218123456789"
+    }
+  },
+  {
+    "name": "us_national_format",
+    "raw_input": "(415) 555-0100",
+    "default_region": "US",
+    "wati_contact_id": "us-1",
+    "equivalent_group": "us_sf",
+    "expected": {
+      "phone_e164": "+14155550100",
+      "phone_identity_key": "e164:+14155550100",
+      "normalization_status": "assumed_region",
+      "normalization_region": "US",
+      "wati_lookup_phone": "14155550100"
+    }
+  },
+  {
+    "name": "us_international_digits",
+    "raw_input": "14155550100",
+    "default_region": null,
+    "wati_contact_id": "us-2",
+    "equivalent_group": "us_sf",
+    "expected": {
+      "phone_e164": "+14155550100",
+      "phone_identity_key": "e164:+14155550100",
+      "normalization_status": "e164",
+      "normalization_region": "US",
+      "wati_lookup_phone": "14155550100"
+    }
+  },
+  {
+    "name": "uk_national_format",
+    "raw_input": "020 7946 0056",
+    "default_region": "GB",
+    "wati_contact_id": "uk-1",
+    "equivalent_group": "uk_london",
+    "expected": {
+      "phone_e164": "+442079460056",
+      "phone_identity_key": "e164:+442079460056",
+      "normalization_status": "assumed_region",
+      "normalization_region": "GB",
+      "wati_lookup_phone": "442079460056"
+    }
+  },
+  {
+    "name": "uk_international_format",
+    "raw_input": "+44 20 7946 0056",
+    "default_region": null,
+    "wati_contact_id": "uk-2",
+    "equivalent_group": "uk_london",
+    "expected": {
+      "phone_e164": "+442079460056",
+      "phone_identity_key": "e164:+442079460056",
+      "normalization_status": "e164",
+      "normalization_region": "GB",
+      "wati_lookup_phone": "442079460056"
+    }
+  },
+  {
+    "name": "ambiguous_local_with_provider_a",
+    "raw_input": "02079460056",
+    "default_region": null,
+    "wati_contact_id": "ambiguous-a",
+    "expected": {
+      "phone_e164": null,
+      "phone_identity_key": "wati:ambiguous-a",
+      "normalization_status": "wati_fallback",
+      "normalization_region": null,
+      "wati_lookup_phone": "02079460056"
+    }
+  },
+  {
+    "name": "ambiguous_local_with_provider_b",
+    "raw_input": "02079460056",
+    "default_region": null,
+    "wati_contact_id": "ambiguous-b",
+    "expected": {
+      "phone_e164": null,
+      "phone_identity_key": "wati:ambiguous-b",
+      "normalization_status": "wati_fallback",
+      "normalization_region": null,
+      "wati_lookup_phone": "02079460056"
+    }
+  },
+  {
+    "name": "raw_fallback_without_provider",
+    "raw_input": "000-111",
+    "default_region": "US",
+    "wati_contact_id": null,
+    "expected": {
+      "phone_e164": null,
+      "phone_identity_key": "raw:000111",
+      "normalization_status": "raw_fallback",
+      "normalization_region": "US",
+      "wati_lookup_phone": "000111"
+    }
+  }
+]

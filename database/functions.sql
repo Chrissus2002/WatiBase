@@ -1,9 +1,28 @@
--- Helper: strip all non-digit characters from a phone string
+-- Legacy Wati-lookup normalizer: strips non-digits, then fixes Mexican mobile
+-- numbers (52X → 521X). Mirrors the Python legacy_wati_lookup_phone() helper
+-- so SQL joins and Python fetches never drift apart.
 -- Lives in public so PostgREST can expose it via rpc if needed.
 create or replace function public.normalize_phone(p_phone text)
 returns text as $$
-  select regexp_replace(p_phone, '\D', '', 'g');
-$$ language sql immutable;
+declare
+  v_digits text;
+begin
+  if p_phone is null then
+    return null;
+  end if;
+
+  -- Strip all non-digits
+  v_digits := regexp_replace(p_phone, '[^0-9]', '', 'g');
+
+  -- Fix Mexican mobile numbers: 52XXXXXXXXXX → 521XXXXXXXXXX
+  -- If starts with '52' but third digit is not '1', insert '1' after '52'
+  if left(v_digits, 2) = '52' and left(v_digits, 3) != '521' then
+    v_digits := '521' || substring(v_digits from 3);
+  end if;
+
+  return v_digits;
+end;
+$$ language plpgsql immutable;
 
 
 -- Promote contacts from staging.contacts_raw_data into canonical.contacts
@@ -50,6 +69,8 @@ begin
     batch_id,
     phone_normalized,
     phone_raw,
+    phone_raw_primary,
+    wati_lookup_phone,
     name,
     wati_contact_id,
     source,
@@ -60,6 +81,8 @@ begin
     p_batch_id,
     public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')) as phone_normalized,
     coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') as phone_raw,
+    coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') as phone_raw_primary,
+    public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')) as wati_lookup_phone,
     coalesce(raw_data->>'fullName', raw_data->>'name') as name,
     wati_contact_id,
     'wati' as source,
@@ -76,6 +99,8 @@ begin
     end,
     wati_contact_id = coalesce(excluded.wati_contact_id, canonical.contacts.wati_contact_id),
     phone_raw = coalesce(excluded.phone_raw, canonical.contacts.phone_raw),
+    phone_raw_primary = coalesce(excluded.phone_raw_primary, canonical.contacts.phone_raw_primary),
+    wati_lookup_phone = coalesce(excluded.wati_lookup_phone, canonical.contacts.wati_lookup_phone),
     updated_at = now();
 
   get diagnostics v_contacts_processed = row_count;
@@ -102,14 +127,20 @@ begin
     tenant_id,
     provider,
     provider_contact_id,
-    provider_phone
+    provider_phone,
+    is_primary,
+    first_seen_at,
+    last_seen_at
   )
   select
     c.contact_id,
     ctp.tenant_id,
     'wati',
     ctp.wati_contact_id,
-    coalesce(ctp.raw_data->>'wAid', ctp.raw_data->>'phone', ctp.raw_data->>'whatsappNumber')
+    coalesce(ctp.raw_data->>'wAid', ctp.raw_data->>'phone', ctp.raw_data->>'whatsappNumber'),
+    true,
+    now(),
+    now()
   from contacts_to_process ctp
   join canonical.contacts c
     on c.tenant_id = ctp.tenant_id
@@ -119,6 +150,7 @@ begin
   on conflict (tenant_id, provider, provider_contact_id)
   do update set
     provider_phone = coalesce(excluded.provider_phone, canonical.contact_provider_keys.provider_phone),
+    last_seen_at = now(),
     updated_at = now();
 
   select count(*) into v_contacts_created
@@ -182,7 +214,7 @@ begin
     from staging.messages_raw_data s
     join canonical.contacts c
       on c.tenant_id = s.tenant_id
-      and c.phone_normalized = public.normalize_phone(s.conversation_id)
+      and coalesce(c.wati_lookup_phone, c.phone_normalized) = public.normalize_phone(s.conversation_id)
     where s.batch_id = p_batch_id
   )
   insert into canonical.messages (
@@ -234,7 +266,7 @@ begin
     and not exists (
       select 1 from canonical.contacts c
       where c.tenant_id = s.tenant_id
-        and c.phone_normalized = public.normalize_phone(s.conversation_id)
+        and coalesce(c.wati_lookup_phone, c.phone_normalized) = public.normalize_phone(s.conversation_id)
     );
 
   raise notice 'Complete: % messages processed, % skipped (no matching contact)',
