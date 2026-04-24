@@ -16,11 +16,18 @@ class WatiClient:
 
         self.tenant_id = tenant_id
         self.api_token = api_token
-        self.url = api_url
+        self.url = api_url.rstrip("/")
         self.headers = {
-            "Authorization": self.api_token,
+            "Authorization": self._authorization_header(api_token),
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _authorization_header(api_token: str) -> str:
+        token = api_token.strip()
+        if token.lower().startswith("bearer "):
+            return token
+        return f"Bearer {token}"
         
     def __str__(self):
         return f"WatiClient(tenant_id={self.tenant_id}, url={self.url})"
@@ -62,11 +69,12 @@ class WatiClient:
                 print(url)
                 response = session.get(url)
                 if response.status_code != 200:
-                    raise Exception(f"Failed to resquest contacts at url: {url}")
+                    raise Exception(f"Failed to request contacts at url: {url} (status {response.status_code})")
                 data = response.json()
                 all_contacts.extend(data.get("contact_list", []))
                 pages_fetched += 1
-                url = (data.get("link")).get("nextPage")
+                links = data.get("link") or {}
+                url = links.get("nextPage")
                 if url is not None:
                     time.sleep(5)
 
@@ -83,7 +91,7 @@ class WatiClient:
                 url = self.url + f"/api/v1/getMessages/{phone_number}?pageSize={page_size}&page={page_number}"
                 response = session.get(url)
                 if response.status_code != 200:
-                    raise Exception(f"Failed to request messages at url: {url}")
+                    raise Exception(f"Failed to request messages at url: {url} (status {response.status_code})")
                 data = response.json()
                 if phone_number not in all_messages:
                     all_messages[phone_number] = []

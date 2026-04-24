@@ -236,3 +236,20 @@ create table if not exists ops.webhook_processing_status (
     total_failed bigint not null default 0,
     updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+
+create index if not exists idx_webhook_processing_status_updated
+    on ops.webhook_processing_status (updated_at desc);
+
+
+-- ============================================================
+-- API grants
+-- ============================================================
+
+grant usage on schema public, staging, canonical, analytics, ops to service_role;
+grant all privileges on all tables in schema public, staging, canonical, analytics, ops to service_role;
+grant usage, select on all sequences in schema public, staging, canonical, analytics, ops to service_role;
+
+alter default privileges in schema public, staging, canonical, analytics, ops
+    grant all privileges on tables to service_role;
+alter default privileges in schema public, staging, canonical, analytics, ops
+    grant usage, select on sequences to service_role;

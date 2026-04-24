@@ -142,6 +142,12 @@ end;
 $$ language plpgsql;
 
 
+grant execute on all functions in schema public to service_role;
+
+alter default privileges in schema public
+    grant execute on functions to service_role;
+
+
 -- Promote messages from staging.messages_raw_data into canonical.messages
 -- for a given import batch. Resolves contact_id by joining to canonical.contacts.
 -- Called via Supabase rpc('process_messages_to_canonical', {p_batch_id: '...'})

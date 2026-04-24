@@ -17,7 +17,7 @@ class SupabaseClient:
 
     def test_connection(self):
         try:
-            print(self.client.table('tenant').select('*').limit(1).execute())
+            self.client.table('tenant').select('*').limit(1).execute()
             return True
         except Exception as e:
             print(f"Connection test failed: {e}")

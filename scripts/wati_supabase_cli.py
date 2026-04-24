@@ -22,16 +22,34 @@ from batch_contact_import import BatchContactImport
 from batch_message_import import BatchMessageImport
 
 load_dotenv()
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_KEY")
-try:
+client: SupabaseClient | None = None
+
+
+def runtime_supabase_url() -> str | None:
+    return os.getenv("SUPABASE_URL")
+
+
+def runtime_supabase_key() -> str | None:
+    return os.getenv("SUPABASE_KEY")
+
+
+def get_supabase_client() -> SupabaseClient:
+    global client
+    if client is not None:
+        return client
+
+    supabase_url = runtime_supabase_url()
+    supabase_key = runtime_supabase_key()
+    if not supabase_url or not supabase_key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set")
+
     client = SupabaseClient(supabase_url, supabase_key)
-except Exception as e:
-    print(f"Error initializing Supabase client: {e}")
-    sys.exit(1)
+    return client
+
+
 def get_wati_client(tenant_id: int) -> WatiClient:
     """Create a WatiClient from DB credentials for the given tenant."""
-    return WatiClient.from_supabase(client, tenant_id)
+    return WatiClient.from_supabase(get_supabase_client(), tenant_id)
 
 @dataclass
 class StatusSnapshot:
@@ -76,12 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     sync_subparsers = sync_parser.add_subparsers(dest="sync_command", required=True)
     sync_contacts_parser = sync_subparsers.add_parser("contacts", help="Sync contacts from Wati")
     sync_contacts_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
-    sync_contacts_parser.add_argument("--limit", type=int, default=None, help="Max number of contacts to import (for testing)")
+    sync_contacts_parser.add_argument("--limit", type=int, default=None, help="Max number of Wati contact pages to import (for testing)")
     sync_contacts_parser.set_defaults(handler=handle_sync_contacts)
 
     backfill_parser = subparsers.add_parser("backfill", help="Backfill historical messages")
     backfill_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
-    backfill_parser.add_argument("--limit", type=int, default=None, help="Max contacts to process (for testing)")
+    backfill_parser.add_argument("--limit", type=int, default=None, help="Max pages of canonical contacts to process (for testing)")
     backfill_parser.add_argument("--resume", type=str, default=None, help="Resume a failed/interrupted job by job_id")
     backfill_parser.add_argument("--_background", action="store_true", default=False, help=argparse.SUPPRESS)
     backfill_parser.set_defaults(handler=handle_backfill_messages)
@@ -123,7 +141,7 @@ def handle_not_implemented(args: argparse.Namespace) -> int:
 
 def handle_test_connection(args: argparse.Namespace) -> int:
     try:
-        response = client.test_connection()
+        response = get_supabase_client().test_connection()
 
         if response:
             print("Supabase connection OK", flush=True)
@@ -137,8 +155,11 @@ def handle_test_connection(args: argparse.Namespace) -> int:
 
 
 def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
+    supabase_url = runtime_supabase_url()
+    supabase_key = runtime_supabase_key()
+    db_client = get_supabase_client()
     tenant_response = (
-        client.get_client().table("tenant")
+        db_client.get_client().table("tenant")
         .select("tenant_id, name, slug")
         .eq("tenant_id", tenant_id)
         .limit(1)
@@ -151,7 +172,7 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
     tenant = tenant_rows[0]
 
     connector_response = (
-        client.get_client().table("tenant_connectors")
+        db_client.get_client().table("tenant_connectors")
         .select("wati_api_url, wati_api_token")
         .eq("tenant_id", tenant_id)
         .eq("provider", "wati")
@@ -173,11 +194,19 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
     )
 
 
+def mask_secret(value: str | None, suffix: int = 4) -> str:
+    if not value:
+        return "not configured"
+    if len(value) <= suffix:
+        return "*" * len(value)
+    return f"***{value[-suffix:]}"
+
+
 def format_status(snapshot: StatusSnapshot) -> str:
     lines: list[str] = []
     lines.append("Supabase")
     lines.append(f"  URL:   {snapshot.supabase_url}")
-    lines.append(f"  Key:   {snapshot.supabase_key}")
+    lines.append(f"  Key:   {mask_secret(snapshot.supabase_key)}")
     lines.append("")
     lines.append("Tenant")
     lines.append(f"  ID:    {snapshot.tenant_id}")
@@ -186,7 +215,7 @@ def format_status(snapshot: StatusSnapshot) -> str:
     lines.append("")
     lines.append("Wati Connector")
     lines.append(f"  URL:   {snapshot.wati_api_url or 'not configured'}")
-    lines.append(f"  Token: {snapshot.wati_api_token or 'not configured'}")
+    lines.append(f"  Token: {mask_secret(snapshot.wati_api_token)}")
 
     return "\n".join(lines) + "\n"
 
@@ -268,7 +297,8 @@ def handle_setup(args) -> int:
     tenant_name = input("Tenant name: ").strip()
     tenant_slug = input("Tenant slug (url-safe identifier): ").strip()
     tenant_id_input = input("Tenant ID: ").strip()
-    wati_api_url = "https://live-server.wati.io/" + tenant_id_input
+    default_wati_api_url = f"https://live-mt-server.wati.io/{tenant_id_input}"
+    wati_api_url = input(f"Wati API Endpoint URL [{default_wati_api_url}]: ").strip() or default_wati_api_url
     wati_api_token = input("Wati API Token: ").strip()
 
     try:
@@ -310,8 +340,9 @@ def handle_setup(args) -> int:
 
 def handle_sync_contacts(args: argparse.Namespace) -> int:
     try:
+        db_client = get_supabase_client()
         wati = get_wati_client(args.tenant_id)
-        importer = BatchContactImport(client, wati, args.tenant_id)
+        importer = BatchContactImport(db_client, wati, args.tenant_id)
         result = importer.run(limit=args.limit)
         print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']}", flush=True)
         return 0
@@ -326,8 +357,9 @@ def handle_sync_contacts(args: argparse.Namespace) -> int:
 
 def _check_existing_backfill(tenant_id: int) -> dict | None:
     """Return the running job dict if a backfill is already active for this tenant, else None."""
+    db_client = get_supabase_client()
     result = (
-        client.get_client().schema("ops").table("import_jobs")
+        db_client.get_client().schema("ops").table("import_jobs")
         .select("job_id, subprocess_pid")
         .eq("tenant_id", tenant_id)
         .eq("job_type", "message_backfill")
@@ -350,7 +382,7 @@ def _check_existing_backfill(tenant_id: int) -> dict | None:
         return job
     except OSError:
         # Process is dead — mark the stale job as failed
-        client.get_client().schema("ops").table("import_jobs").update({
+        db_client.get_client().schema("ops").table("import_jobs").update({
             "status": "failed",
             "error_message": f"Process died unexpectedly (PID {pid} no longer running)",
         }).eq("job_id", job["job_id"]).execute()
@@ -363,8 +395,9 @@ def handle_backfill_messages(args: argparse.Namespace) -> int:
     if getattr(args, '_background', False):
         # Child process — run synchronously
         try:
+            db_client = get_supabase_client()
             wati = get_wati_client(args.tenant_id)
-            importer = BatchMessageImport(client, wati, args.tenant_id)
+            importer = BatchMessageImport(db_client, wati, args.tenant_id)
             result = importer.run(limit=args.limit, resume_job_id=resume_job_id)
             print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']} skipped={result['skipped']}", flush=True)
             return 0
