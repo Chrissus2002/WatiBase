@@ -1,16 +1,18 @@
 <!-- molds
 id: supawati-10
-stage: design
-resume_stage:
-parent:
-deps:
+stage: qa
+resume_stage: 
+parent: 
+deps: 
 priority: P1
 created_at: 2026-04-24T07:46:02Z
-updated_at: 2026-04-24T07:50:00Z
-closed_at:
-defer_until:
-code_branch:
+updated_at: 2026-04-24T16:10:09Z
+closed_at: 
+defer_until: 
+code_branch: 
 -->
+
+
 
 # Port dialo-cx phone identity and smart contact deduplication
 
@@ -74,7 +76,7 @@ Do **not** blindly copy schema names (`silver`, `gold`) or app-layer helpers.
 Adapt the connector-owned semantics into Wati-Base's `public` / `canonical` /
 `ops` layout.
 
-## Chosen Implementation Shape
+## Solution
 
 Port the hardened normalization from `dialo-cx`, but do it in a way that fits
 Wati-Base's current architecture instead of trying to recreate `dialo-cx`
@@ -315,20 +317,20 @@ Repo reality note:
 - this mold should add a minimal, reproducible Python test surface rather than
   relying on ad hoc local `.venv` state
 
-## Files To Modify In Wati-Base
+## Files to Modify
 
-| File | Action | Purpose |
-|------|--------|---------|
-| `database/init_db.sql` | Modify | add connector region field, contact identity fields, indexes, provider key fields if needed |
-| `database/functions.sql` | Modify | port legacy Wati normalizer semantics and adapt promotion logic |
-| `shared/phone_identity.py` | Create | neutral port of `dialo-cx` parser/identity helpers |
-| `shared/batch_contact_import.py` | Modify | populate smart identity fields during/after contact sync |
-| `shared/batch_message_import.py` | Modify | fetch messages via `wati_lookup_phone` |
-| `shared/wati_client.py` | Maybe modify | only if needed for cleaner lookup-phone call sites; avoid unnecessary transport changes |
-| `scripts/wati_supabase_cli.py` | Modify | surface connector region config where needed; keep status/setup aligned |
-| `tests/unit/test_phone_identity.py` | Create | port/adapt identity tests |
-| `tests/fixtures/phone_identity_cases.json` | Create | port/adapt fixture cases |
-| `requirements.txt` | Create | pin runtime + test deps needed to reproduce `phonenumbers` and `pytest` locally |
+| File | Action | Purpose | Done |
+|------|--------|---------|------|
+| `database/init_db.sql` | Modify | add connector region field, contact identity fields, indexes, provider key fields if needed | yes |
+| `database/functions.sql` | Modify | port legacy Wati normalizer semantics and adapt promotion logic | yes |
+| `shared/phone_identity.py` | Create | neutral port of `dialo-cx` parser/identity helpers | yes |
+| `shared/batch_contact_import.py` | Modify | populate smart identity fields during/after contact sync | yes |
+| `shared/batch_message_import.py` | Modify | fetch messages via `wati_lookup_phone` | yes |
+| `shared/wati_client.py` | Maybe modify | only if needed for cleaner lookup-phone call sites; avoid unnecessary transport changes | skipped (not needed) |
+| `scripts/wati_supabase_cli.py` | Modify | surface connector region config where needed; keep status/setup aligned | yes |
+| `tests/unit/test_phone_identity.py` | Create | port/adapt identity tests | yes |
+| `tests/fixtures/phone_identity_cases.json` | Create | port/adapt fixture cases | yes |
+| `requirements.txt` | Create | pin runtime + test deps needed to reproduce `phonenumbers` and `pytest` locally | yes |
 
 ## Out of Scope
 
@@ -388,6 +390,7 @@ Using Filippa test tenant `310131` on the self-hosted Supabase stack:
 - Keep this mold scoped to core ingest/backfill correctness. If the build starts
   pulling in an identity refresh daemon, exact drift check, or manual merge UX,
   split a follow-up mold instead of letting this one sprawl
+- Source files are in `/Users/christianschipper/Workspace/github/Chrissus2002/V2_wati_filippa` (referred to as "dialo-cx" in this mold)
 
 ## Related Molds
 
