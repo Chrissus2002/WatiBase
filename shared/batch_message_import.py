@@ -130,11 +130,14 @@ class BatchMessageImport:
                         msg_id = msg.get("id")
                         if not msg_id:
                             continue
+                        # We fetch messages per contact phone. Persist that phone as the
+                        # canonical join key so promotion can resolve contact_id reliably,
+                        # while the raw WATI conversation identifier remains in raw_data.
                         staging_rows.append({
                             "tenant_id": self.db_tenant_id,
                             "batch_id": batch_id,
                             "wati_message_id": str(msg_id),
-                            "conversation_id": msg.get("conversationId") or str(phone),
+                            "conversation_id": str(phone),
                             "raw_data": msg,
                         })
 

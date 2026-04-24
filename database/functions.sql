@@ -206,8 +206,20 @@ begin
     coalesce(raw_data->>'messageType', 'text') as message_type,
     wati_message_id,
     coalesce(
-      (raw_data->>'timestamp')::timestamptz,
-      (raw_data->>'created')::timestamptz,
+      case
+        when coalesce(raw_data->>'timestamp', '') ~ '^[0-9]+(\.[0-9]+)?$'
+          then to_timestamp((raw_data->>'timestamp')::double precision)
+        when raw_data ? 'timestamp'
+          then (raw_data->>'timestamp')::timestamptz
+        else null
+      end,
+      case
+        when coalesce(raw_data->>'created', '') ~ '^[0-9]+(\.[0-9]+)?$'
+          then to_timestamp((raw_data->>'created')::double precision)
+        when raw_data ? 'created'
+          then (raw_data->>'created')::timestamptz
+        else null
+      end,
       now()
     ) as timestamp
   from messages_to_process
