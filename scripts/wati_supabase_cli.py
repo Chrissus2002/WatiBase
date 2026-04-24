@@ -61,11 +61,6 @@ class StatusSnapshot:
     wati_api_url: str | None
     wati_api_token: str | None
 
-
-def _placeholder(parser: argparse.ArgumentParser, command_path: str) -> None:
-    parser.set_defaults(handler=handle_not_implemented, command_path=command_path)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wati-supabase",
