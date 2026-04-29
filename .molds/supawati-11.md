@@ -1,6 +1,6 @@
 <!-- molds
 id: supawati-11
-stage: qa
+stage: land
 resume_stage:
 parent:
 deps: supawati-10
@@ -252,3 +252,16 @@ Observed live result:
   phone identity across different provider contact IDs. That broader policy can
   be designed later if needed; the immediate production issue is the same-Wati
   contact split introduced by the identity rollout itself.
+- QA review completed on commit `64455c9706ad4b416247b6c0f6ca6aa5f2a9a116`.
+- Native `molds qa-pass` was unavailable because this repo still reports
+  legacy molds config. QA evidence was recorded manually in this file.
+- Additional QA checks beyond the build pass:
+  - `pytest -q tests/unit/test_phone_identity.py tests/unit/test_contact_identity_repair.py`
+    passed with `11/11`
+  - live Filippa tenant remained healthy after the repair rerun and post-repair
+    sync smoke: null identity rows `0`, duplicate `wati_contact_id` groups `0`,
+    provider-key/contact mismatches `0`
+  - rolled-back SQL harness verified `public.merge_canonical_contacts()`
+    reattaches messages/provider keys and deletes the loser row
+  - rolled-back SQL harness verified `public.process_contacts_to_canonical()`
+    updates the existing provider-matched contact instead of inserting a split
