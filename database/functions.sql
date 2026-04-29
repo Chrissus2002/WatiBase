@@ -217,6 +217,7 @@ returns jsonb as $$
 declare
   v_row staging.messages_raw_data%rowtype;
   v_contact_id uuid;
+  v_contact_created boolean := false;
   v_rows_inserted integer := 0;
 begin
   select * into v_row
@@ -237,14 +238,37 @@ begin
     and coalesce(wati_lookup_phone, phone_normalized) = public.normalize_phone(v_row.conversation_id)
   limit 1;
 
+  -- Auto-create a minimal contact if none exists yet.
+  -- The next 'sync contacts' run will enrich it with the full profile.
   if v_contact_id is null then
-    return jsonb_build_object(
-      'status', 'skipped',
-      'reason', 'no_matching_contact',
-      'staging_id', p_staging_id,
-      'tenant_id', v_row.tenant_id,
-      'conversation_id', v_row.conversation_id
-    );
+    insert into canonical.contacts (
+      tenant_id,
+      phone_normalized,
+      phone_raw,
+      wati_lookup_phone,
+      source,
+      is_canonical
+    )
+    values (
+      v_row.tenant_id,
+      public.normalize_phone(v_row.conversation_id),
+      v_row.conversation_id,
+      public.normalize_phone(v_row.conversation_id),
+      'webhook',
+      true
+    )
+    on conflict (tenant_id, phone_normalized) do nothing
+    returning contact_id into v_contact_id;
+
+    -- If the insert was a no-op (race condition), fetch the existing row
+    if v_contact_id is null then
+      select contact_id into v_contact_id
+      from canonical.contacts
+      where tenant_id = v_row.tenant_id
+        and phone_normalized = public.normalize_phone(v_row.conversation_id);
+    else
+      v_contact_created := true;
+    end if;
   end if;
 
   -- Insert into canonical, skip on duplicate
@@ -293,6 +317,7 @@ begin
     'staging_id', p_staging_id,
     'tenant_id', v_row.tenant_id,
     'contact_id', v_contact_id,
+    'contact_created', v_contact_created,
     'wati_message_id', v_row.wati_message_id
   );
 end;

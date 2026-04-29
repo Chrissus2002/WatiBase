@@ -51,15 +51,19 @@ Duplicate deliveries are safe:
 - Canonical insert uses `ON CONFLICT DO NOTHING`
 - Each webhook log entry gets its own processing log record
 
-## Contact Dependency
+## Auto-Contact Creation
 
-Message promotion requires a matching canonical contact (joined via
-`normalize_phone(conversation_id)`). If no contact exists:
+If no canonical contact exists for the incoming phone number, the promotion
+RPC auto-creates a minimal contact with:
 
-- Message is staged successfully
-- Promotion returns status `skipped` with reason `no_matching_contact`
-- Processing log records the skip
-- The next `sync contacts` + batch promotion picks up orphaned messages
+- `phone_normalized` and `wati_lookup_phone` from `normalize_phone(waId)`
+- `phone_raw` = raw `waId`
+- `source` = `'webhook'`
+
+The message is then promoted normally. The next `sync contacts` run enriches
+the auto-created contact with the full Wati profile (name, identity fields, etc.).
+
+The promotion response includes `contact_created: true` when this happens.
 
 ## Health Monitoring
 
