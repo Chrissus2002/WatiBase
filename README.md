@@ -53,3 +53,18 @@ Data flows through a layered pipeline:
 4. **Analytics** -- downstream reporting projections
 
 Background jobs (like `backfill`) are tracked and can resume from checkpoints if interrupted. The system is fully multi-tenant -- each tenant gets its own Wati connector config and isolated data.
+
+## Live identity rollout
+
+Existing deployments created before `supawati-10` need an explicit upgrade
+sequence; rerunning `database/init_db.sql` is not enough.
+
+Recommended order for live installs:
+
+1. apply `database/upgrade_identity_schema.sql`
+2. reapply `database/functions.sql`
+3. run `wati-supabase repair contacts --tenant-id <id>`
+4. run `wati-supabase sync contacts --tenant-id <id> --limit 1`
+
+Use `wati-supabase repair contacts --tenant-id <id> --dry-run` first when you
+want a preview of the planned merge/update counts.

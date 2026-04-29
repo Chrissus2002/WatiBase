@@ -142,6 +142,10 @@ create index if not exists idx_canonical_contacts_wati_lookup
     on canonical.contacts (tenant_id, wati_lookup_phone)
     where wati_lookup_phone is not null;
 
+create index if not exists idx_canonical_contacts_wati_contact_id
+    on canonical.contacts (tenant_id, wati_contact_id)
+    where wati_contact_id is not null;
+
 -- Maps Wati provider identities to canonical contacts.
 -- Provider-specific fields live here, not on canonical.contacts.
 create table if not exists canonical.contact_provider_keys (

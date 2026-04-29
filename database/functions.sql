@@ -47,7 +47,8 @@ begin
 
   raise notice 'Processing batch % for tenant %', p_batch_id, v_tenant_id;
 
-  -- Deduplicate within the batch by normalized phone (latest last_seen_at wins)
+  -- Deduplicate within the batch by normalized phone (latest last_seen_at wins).
+  -- Resolve existing provider identity before falling back to normalized phone.
   with contacts_to_process as (
     select distinct on (
       tenant_id,
@@ -55,7 +56,10 @@ begin
     )
       tenant_id,
       wati_contact_id,
-      raw_data
+      raw_data,
+      public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')) as normalized_phone,
+      coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') as raw_phone,
+      coalesce(raw_data->>'fullName', raw_data->>'name') as contact_name
     from staging.contacts_raw_data
     where batch_id = p_batch_id
       and coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') is not null
@@ -63,100 +67,130 @@ begin
       tenant_id,
       public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')),
       last_seen_at desc
-  )
-  insert into canonical.contacts (
-    tenant_id,
-    batch_id,
-    phone_normalized,
-    phone_raw,
-    phone_raw_primary,
-    wati_lookup_phone,
-    name,
-    wati_contact_id,
-    source,
-    is_canonical
-  )
-  select
-    tenant_id,
-    p_batch_id,
-    public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')) as phone_normalized,
-    coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') as phone_raw,
-    coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') as phone_raw_primary,
-    public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')) as wati_lookup_phone,
-    coalesce(raw_data->>'fullName', raw_data->>'name') as name,
-    wati_contact_id,
-    'wati' as source,
-    true as is_canonical
-  from contacts_to_process
-  on conflict (tenant_id, phone_normalized)
-  do update set
-    name = case
-      when excluded.name is not null and (
-        canonical.contacts.name is null or
-        length(excluded.name) > length(canonical.contacts.name)
-      ) then excluded.name
-      else canonical.contacts.name
-    end,
-    wati_contact_id = coalesce(excluded.wati_contact_id, canonical.contacts.wati_contact_id),
-    phone_raw = coalesce(excluded.phone_raw, canonical.contacts.phone_raw),
-    phone_raw_primary = coalesce(excluded.phone_raw_primary, canonical.contacts.phone_raw_primary),
-    wati_lookup_phone = coalesce(excluded.wati_lookup_phone, canonical.contacts.wati_lookup_phone),
-    updated_at = now();
-
-  get diagnostics v_contacts_processed = row_count;
-
-  -- Upsert provider keys, joining back to get the canonical contact_id
-  with contacts_to_process as (
-    select distinct on (
+  ),
+  resolved as (
+    select
+      ctp.*,
+      cpk.contact_id as provider_contact_match_id,
+      c_by_phone.contact_id as phone_contact_match_id,
+      coalesce(cpk.contact_id, c_by_phone.contact_id) as resolved_contact_id
+    from contacts_to_process ctp
+    left join canonical.contact_provider_keys cpk
+      on cpk.tenant_id = ctp.tenant_id
+      and cpk.provider = 'wati'
+      and cpk.provider_contact_id = ctp.wati_contact_id
+    left join canonical.contacts c_by_phone
+      on c_by_phone.tenant_id = ctp.tenant_id
+      and c_by_phone.phone_normalized = ctp.normalized_phone
+  ),
+  updated as (
+    update canonical.contacts c
+    set
+      batch_id = p_batch_id,
+      phone_normalized = case
+        when resolved.normalized_phone is null then c.phone_normalized
+        when c.phone_normalized = resolved.normalized_phone then c.phone_normalized
+        when exists (
+          select 1
+          from canonical.contacts other
+          where other.tenant_id = c.tenant_id
+            and other.phone_normalized = resolved.normalized_phone
+            and other.contact_id <> c.contact_id
+        ) then c.phone_normalized
+        else resolved.normalized_phone
+      end,
+      phone_raw = coalesce(resolved.raw_phone, c.phone_raw),
+      phone_raw_primary = coalesce(resolved.raw_phone, c.phone_raw_primary),
+      wati_lookup_phone = coalesce(resolved.normalized_phone, c.wati_lookup_phone),
+      name = case
+        when resolved.contact_name is not null and (
+          c.name is null or
+          length(resolved.contact_name) > length(c.name)
+        ) then resolved.contact_name
+        else c.name
+      end,
+      wati_contact_id = coalesce(resolved.wati_contact_id, c.wati_contact_id),
+      source = coalesce(c.source, 'wati'),
+      updated_at = now()
+    from resolved
+    where resolved.resolved_contact_id = c.contact_id
+    returning c.contact_id
+  ),
+  inserted as (
+    insert into canonical.contacts (
       tenant_id,
-      public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber'))
-    )
-      tenant_id,
+      batch_id,
+      phone_normalized,
+      phone_raw,
+      phone_raw_primary,
+      wati_lookup_phone,
+      name,
       wati_contact_id,
-      raw_data
-    from staging.contacts_raw_data
-    where batch_id = p_batch_id
-      and coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') is not null
-    order by
+      source,
+      is_canonical
+    )
+    select
+      resolved.tenant_id,
+      p_batch_id,
+      resolved.normalized_phone,
+      resolved.raw_phone,
+      resolved.raw_phone,
+      resolved.normalized_phone,
+      resolved.contact_name,
+      resolved.wati_contact_id,
+      'wati',
+      true
+    from resolved
+    where resolved.resolved_contact_id is null
+    returning contact_id, tenant_id, phone_normalized
+  ),
+  provider_rows as (
+    select
+      coalesce(resolved.resolved_contact_id, inserted.contact_id) as contact_id,
+      resolved.tenant_id,
+      resolved.wati_contact_id,
+      resolved.raw_phone
+    from resolved
+    left join inserted
+      on inserted.tenant_id = resolved.tenant_id
+      and inserted.phone_normalized = resolved.normalized_phone
+  ),
+  provider_upsert as (
+    insert into canonical.contact_provider_keys (
+      contact_id,
       tenant_id,
-      public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')),
-      last_seen_at desc
-  )
-  insert into canonical.contact_provider_keys (
-    contact_id,
-    tenant_id,
-    provider,
-    provider_contact_id,
-    provider_phone,
-    is_primary,
-    first_seen_at,
-    last_seen_at
+      provider,
+      provider_contact_id,
+      provider_phone,
+      is_primary,
+      first_seen_at,
+      last_seen_at
+    )
+    select
+      provider_rows.contact_id,
+      provider_rows.tenant_id,
+      'wati',
+      provider_rows.wati_contact_id,
+      provider_rows.raw_phone,
+      true,
+      now(),
+      now()
+    from provider_rows
+    where provider_rows.contact_id is not null
+      and provider_rows.wati_contact_id is not null
+    on conflict (tenant_id, provider, provider_contact_id)
+    do update set
+      contact_id = excluded.contact_id,
+      provider_phone = coalesce(excluded.provider_phone, canonical.contact_provider_keys.provider_phone),
+      is_primary = excluded.is_primary,
+      last_seen_at = excluded.last_seen_at,
+      updated_at = now()
+    returning contact_id
   )
   select
-    c.contact_id,
-    ctp.tenant_id,
-    'wati',
-    ctp.wati_contact_id,
-    coalesce(ctp.raw_data->>'wAid', ctp.raw_data->>'phone', ctp.raw_data->>'whatsappNumber'),
-    true,
-    now(),
-    now()
-  from contacts_to_process ctp
-  join canonical.contacts c
-    on c.tenant_id = ctp.tenant_id
-    and c.phone_normalized = public.normalize_phone(
-      coalesce(ctp.raw_data->>'wAid', ctp.raw_data->>'phone', ctp.raw_data->>'whatsappNumber')
-    )
-  on conflict (tenant_id, provider, provider_contact_id)
-  do update set
-    provider_phone = coalesce(excluded.provider_phone, canonical.contact_provider_keys.provider_phone),
-    last_seen_at = now(),
-    updated_at = now();
-
-  select count(*) into v_contacts_created
-  from canonical.contacts
-  where tenant_id = v_tenant_id
-    and created_at >= now() - interval '1 minute';
+    (select count(*) from updated) + (select count(*) from inserted),
+    (select count(*) from inserted)
+  into v_contacts_processed, v_contacts_created;
 
   v_contacts_updated := v_contacts_processed - v_contacts_created;
 
@@ -169,6 +203,91 @@ begin
     'contacts_processed', v_contacts_processed,
     'contacts_created', v_contacts_created,
     'contacts_updated', v_contacts_updated
+  );
+end;
+$$ language plpgsql;
+
+
+create or replace function public.merge_canonical_contacts(
+  p_survivor_contact_id uuid,
+  p_loser_contact_id uuid
+)
+returns jsonb as $$
+declare
+  v_survivor_tenant_id bigint;
+  v_loser_tenant_id bigint;
+  v_messages_moved integer := 0;
+  v_provider_keys_moved integer := 0;
+  v_duplicate_provider_keys_deleted integer := 0;
+  v_contact_deleted integer := 0;
+begin
+  if p_survivor_contact_id is null or p_loser_contact_id is null then
+    raise exception 'Both survivor and loser contact IDs are required';
+  end if;
+
+  if p_survivor_contact_id = p_loser_contact_id then
+    raise exception 'Survivor and loser contact IDs must differ';
+  end if;
+
+  select tenant_id into v_survivor_tenant_id
+  from canonical.contacts
+  where contact_id = p_survivor_contact_id;
+
+  select tenant_id into v_loser_tenant_id
+  from canonical.contacts
+  where contact_id = p_loser_contact_id;
+
+  if v_survivor_tenant_id is null or v_loser_tenant_id is null then
+    raise exception 'Both contacts must exist before merge';
+  end if;
+
+  if v_survivor_tenant_id <> v_loser_tenant_id then
+    raise exception 'Cannot merge contacts across tenants';
+  end if;
+
+  update canonical.messages
+  set contact_id = p_survivor_contact_id
+  where contact_id = p_loser_contact_id;
+
+  get diagnostics v_messages_moved = row_count;
+
+  delete from canonical.contact_provider_keys loser
+  using canonical.contact_provider_keys survivor
+  where loser.contact_id = p_loser_contact_id
+    and survivor.contact_id = p_survivor_contact_id
+    and loser.tenant_id = survivor.tenant_id
+    and loser.provider = survivor.provider
+    and loser.provider_contact_id = survivor.provider_contact_id;
+
+  get diagnostics v_duplicate_provider_keys_deleted = row_count;
+
+  update canonical.contact_provider_keys
+  set
+    contact_id = p_survivor_contact_id,
+    updated_at = now()
+  where contact_id = p_loser_contact_id;
+
+  get diagnostics v_provider_keys_moved = row_count;
+
+  delete from canonical.contacts
+  where contact_id = p_loser_contact_id
+    and not exists (
+      select 1 from canonical.messages where contact_id = p_loser_contact_id
+    )
+    and not exists (
+      select 1 from canonical.contact_provider_keys where contact_id = p_loser_contact_id
+    );
+
+  get diagnostics v_contact_deleted = row_count;
+
+  return jsonb_build_object(
+    'tenant_id', v_survivor_tenant_id,
+    'survivor_contact_id', p_survivor_contact_id,
+    'loser_contact_id', p_loser_contact_id,
+    'messages_moved', v_messages_moved,
+    'provider_keys_moved', v_provider_keys_moved,
+    'duplicate_provider_keys_deleted', v_duplicate_provider_keys_deleted,
+    'contact_deleted', v_contact_deleted = 1
   );
 end;
 $$ language plpgsql;

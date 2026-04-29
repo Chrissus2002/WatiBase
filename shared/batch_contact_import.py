@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from phone_identity import build_phone_identity
+from contact_identity_repair import ContactIdentityRepair
 from supabase_client import SupabaseClient
 from wati_client import WatiClient
 
@@ -67,7 +67,17 @@ class BatchContactImport:
             upserted_canonical = promotion.get("contacts_processed", 0)
 
             # Step 3: Enrich canonical contacts with smart identity fields
-            self._enrich_identity_fields(client, batch_id)
+            repair_summary = ContactIdentityRepair(self.supabase_client, self.db_tenant_id).run(
+                batch_id=batch_id,
+                dry_run=False,
+            )
+            print(
+                "Identity repair complete: "
+                f"examined={repair_summary['contacts_examined']} "
+                f"updates={repair_summary['contact_updates']} "
+                f"provider_keys={repair_summary['provider_key_updates']} "
+                f"merged={repair_summary['merged_contacts']}"
+            )
 
             # Mark job completed
             client.schema("ops").table("import_jobs").update({
@@ -90,93 +100,3 @@ class BatchContactImport:
             "upserted_staging": upserted_staging,
             "upserted_canonical": upserted_canonical,
         }
-
-    def _load_default_phone_region(self, client) -> str | None:
-        result = (
-            client.table("tenant_connectors")
-            .select("default_phone_region")
-            .eq("tenant_id", self.db_tenant_id)
-            .eq("provider", "wati")
-            .eq("is_active", True)
-            .limit(1)
-            .execute()
-        )
-        rows = result.data or []
-        if not rows:
-            return None
-        return rows[0].get("default_phone_region")
-
-    def _enrich_identity_fields(self, client, batch_id: str) -> None:
-        default_region = self._load_default_phone_region(client)
-
-        # Load all staged contacts for this batch, paginating past the 1000-row limit
-        staged = []
-        page_size = 1000
-        offset = 0
-        while True:
-            page = (
-                client.schema("staging").table("contacts_raw_data")
-                .select("wati_contact_id, raw_data")
-                .eq("batch_id", batch_id)
-                .range(offset, offset + page_size - 1)
-                .execute()
-            ).data or []
-            if not page:
-                break
-            staged.extend(page)
-            if len(page) < page_size:
-                break
-            offset += page_size
-
-        if not staged:
-            return
-
-        print(f"Enriching {len(staged)} contacts with phone identity fields...")
-
-        for row in staged:
-            raw_data = row["raw_data"]
-            wati_contact_id = row["wati_contact_id"]
-            raw_phone = raw_data.get("wAid") or raw_data.get("phone") or raw_data.get("whatsappNumber")
-
-            identity = build_phone_identity(
-                raw_input=raw_phone,
-                default_region=default_region,
-                wati_contact_id=wati_contact_id,
-            )
-
-            # Find the canonical contact by wati_contact_id
-            contact_row = (
-                client.schema("canonical").table("contacts")
-                .select("contact_id")
-                .eq("tenant_id", self.db_tenant_id)
-                .eq("wati_contact_id", wati_contact_id)
-                .limit(1)
-                .execute()
-            ).data or []
-
-            if not contact_row:
-                continue
-
-            contact_id = contact_row[0]["contact_id"]
-
-            update_fields = {
-                "phone_identity_key": identity.phone_identity_key,
-                "phone_e164": identity.phone_e164,
-                "normalization_status": identity.normalization_status,
-                "normalization_region": identity.normalization_region,
-                "wati_lookup_phone": identity.wati_lookup_phone,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if identity.raw_input:
-                update_fields["phone_raw_primary"] = identity.raw_input
-
-            client.schema("canonical").table("contacts").update(
-                update_fields
-            ).eq("contact_id", contact_id).execute()
-
-            # Update provider key with lookup phone
-            client.schema("canonical").table("contact_provider_keys").update({
-                "provider_phone": identity.wati_lookup_phone or raw_phone,
-                "last_seen_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("tenant_id", self.db_tenant_id).eq("provider_contact_id", wati_contact_id).execute()

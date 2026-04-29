@@ -11,6 +11,7 @@ import subprocess
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from pathlib import Path
@@ -20,6 +21,7 @@ from supabase_client import SupabaseClient
 from wati_client import WatiClient
 from batch_contact_import import BatchContactImport
 from batch_message_import import BatchMessageImport
+from contact_identity_repair import ContactIdentityRepair
 
 load_dotenv()
 client: SupabaseClient | None = None
@@ -105,6 +107,13 @@ def build_parser() -> argparse.ArgumentParser:
     logs_parser.add_argument("--file", default=None, help="Display a specific log file")
     logs_parser.add_argument("--tail", action="store_true", help="Show only the last 50 lines (use with --file)")
     logs_parser.set_defaults(handler=handle_logs)
+
+    repair_parser = subparsers.add_parser("repair", help="Run connector repair operations")
+    repair_subparsers = repair_parser.add_subparsers(dest="repair_command", required=True)
+    repair_contacts_parser = repair_subparsers.add_parser("contacts", help="Repair canonical contact identity state")
+    repair_contacts_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
+    repair_contacts_parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing to the database")
+    repair_contacts_parser.set_defaults(handler=handle_repair_contacts)
 
     to_file_parser = subparsers.add_parser("to-file", help="Download Wati data to local files")
     to_file_subparsers = to_file_parser.add_subparsers(dest="to_file_command", required=True)
@@ -359,6 +368,63 @@ def handle_sync_contacts(args: argparse.Namespace) -> int:
             print(msg)
         else:
             print(f"Error: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+
+def handle_repair_contacts(args: argparse.Namespace) -> int:
+    job_id = None
+    client = None
+    try:
+        db_client = get_supabase_client()
+        repairer = ContactIdentityRepair(db_client, args.tenant_id)
+        client = db_client.get_client()
+        if not args.dry_run:
+            job_result = (
+                client.schema("ops").table("import_jobs").insert(
+                    {
+                        "tenant_id": args.tenant_id,
+                        "job_type": "contact_identity_repair",
+                        "status": "running",
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).execute()
+            )
+            job_id = job_result.data[0]["job_id"]
+            print(f"Repair job created: {job_id}", flush=True)
+
+        result = repairer.run(dry_run=args.dry_run)
+
+        if job_id is not None:
+            client.schema("ops").table("import_jobs").update(
+                {
+                    "status": "completed",
+                    "processed_count": result["contacts_examined"],
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ).eq("job_id", job_id).execute()
+
+        print(
+            "Repair complete. "
+            f"examined={result['contacts_examined']} "
+            f"contact_updates={result['contact_updates']} "
+            f"provider_key_updates={result['provider_key_updates']} "
+            f"merge_groups={result['merge_groups']} "
+            f"merged_contacts={result['merged_contacts']} "
+            f"conflicts={result['conflicts']} "
+            f"dry_run={result['dry_run']}",
+            flush=True,
+        )
+        return 0
+    except Exception as exc:
+        if job_id is not None and client is not None:
+            client.schema("ops").table("import_jobs").update(
+                {
+                    "status": "failed",
+                    "error_message": str(exc),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ).eq("job_id", job_id).execute()
+        print(f"Repair failed: {exc}", file=sys.stderr, flush=True)
         return 1
 
 
