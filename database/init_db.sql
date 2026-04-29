@@ -21,6 +21,7 @@ create table if not exists public.tenant_connectors (
     tenant_id bigint not null references public.tenant(tenant_id),
     wati_api_url text,
     wati_api_token text,
+    webhook_secret text,
     default_phone_region text check (default_phone_region ~ '^[A-Z]{2}$'),
     is_active boolean not null default true,
     last_successful_sync_at timestamp with time zone,

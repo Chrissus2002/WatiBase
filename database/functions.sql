@@ -208,87 +208,136 @@ end;
 $$ language plpgsql;
 
 
-create or replace function public.merge_canonical_contacts(
-  p_survivor_contact_id uuid,
-  p_loser_contact_id uuid
-)
+-- Promote a single webhook-delivered message from staging into canonical.
+-- Looks up the staging row by its primary key, resolves the canonical contact,
+-- and inserts into canonical.messages. Returns a summary JSON with the outcome.
+-- Called from the wati-webhook edge function after staging the raw payload.
+create or replace function public.process_webhook_message_to_canonical(p_staging_id uuid)
 returns jsonb as $$
 declare
-  v_survivor_tenant_id bigint;
-  v_loser_tenant_id bigint;
-  v_messages_moved integer := 0;
-  v_provider_keys_moved integer := 0;
-  v_duplicate_provider_keys_deleted integer := 0;
-  v_contact_deleted integer := 0;
+  v_row staging.messages_raw_data%rowtype;
+  v_contact_id uuid;
+  v_rows_inserted integer := 0;
 begin
-  if p_survivor_contact_id is null or p_loser_contact_id is null then
-    raise exception 'Both survivor and loser contact IDs are required';
-  end if;
+  select * into v_row
+  from staging.messages_raw_data
+  where id = p_staging_id;
 
-  if p_survivor_contact_id = p_loser_contact_id then
-    raise exception 'Survivor and loser contact IDs must differ';
-  end if;
-
-  select tenant_id into v_survivor_tenant_id
-  from canonical.contacts
-  where contact_id = p_survivor_contact_id;
-
-  select tenant_id into v_loser_tenant_id
-  from canonical.contacts
-  where contact_id = p_loser_contact_id;
-
-  if v_survivor_tenant_id is null or v_loser_tenant_id is null then
-    raise exception 'Both contacts must exist before merge';
-  end if;
-
-  if v_survivor_tenant_id <> v_loser_tenant_id then
-    raise exception 'Cannot merge contacts across tenants';
-  end if;
-
-  update canonical.messages
-  set contact_id = p_survivor_contact_id
-  where contact_id = p_loser_contact_id;
-
-  get diagnostics v_messages_moved = row_count;
-
-  delete from canonical.contact_provider_keys loser
-  using canonical.contact_provider_keys survivor
-  where loser.contact_id = p_loser_contact_id
-    and survivor.contact_id = p_survivor_contact_id
-    and loser.tenant_id = survivor.tenant_id
-    and loser.provider = survivor.provider
-    and loser.provider_contact_id = survivor.provider_contact_id;
-
-  get diagnostics v_duplicate_provider_keys_deleted = row_count;
-
-  update canonical.contact_provider_keys
-  set
-    contact_id = p_survivor_contact_id,
-    updated_at = now()
-  where contact_id = p_loser_contact_id;
-
-  get diagnostics v_provider_keys_moved = row_count;
-
-  delete from canonical.contacts
-  where contact_id = p_loser_contact_id
-    and not exists (
-      select 1 from canonical.messages where contact_id = p_loser_contact_id
-    )
-    and not exists (
-      select 1 from canonical.contact_provider_keys where contact_id = p_loser_contact_id
+  if v_row.id is null then
+    return jsonb_build_object(
+      'status', 'error',
+      'error', format('Staging row %s not found', p_staging_id)
     );
+  end if;
 
-  get diagnostics v_contact_deleted = row_count;
+  -- Resolve canonical contact via normalized phone
+  select contact_id into v_contact_id
+  from canonical.contacts
+  where tenant_id = v_row.tenant_id
+    and coalesce(wati_lookup_phone, phone_normalized) = public.normalize_phone(v_row.conversation_id)
+  limit 1;
+
+  if v_contact_id is null then
+    return jsonb_build_object(
+      'status', 'skipped',
+      'reason', 'no_matching_contact',
+      'staging_id', p_staging_id,
+      'tenant_id', v_row.tenant_id,
+      'conversation_id', v_row.conversation_id
+    );
+  end if;
+
+  -- Insert into canonical, skip on duplicate
+  insert into canonical.messages (
+    tenant_id,
+    contact_id,
+    conversation_id,
+    message_content,
+    direction,
+    message_type,
+    wati_message_id,
+    timestamp
+  )
+  values (
+    v_row.tenant_id,
+    v_contact_id,
+    v_row.conversation_id,
+    coalesce(v_row.raw_data->>'text', v_row.raw_data->>'body'),
+    v_row.raw_data->>'type',
+    coalesce(v_row.raw_data->>'messageType', 'text'),
+    v_row.wati_message_id,
+    coalesce(
+      case
+        when coalesce(v_row.raw_data->>'timestamp', '') ~ '^[0-9]+(\.[0-9]+)?$'
+          then to_timestamp((v_row.raw_data->>'timestamp')::double precision)
+        when v_row.raw_data ? 'timestamp'
+          then (v_row.raw_data->>'timestamp')::timestamptz
+        else null
+      end,
+      case
+        when coalesce(v_row.raw_data->>'created', '') ~ '^[0-9]+(\.[0-9]+)?$'
+          then to_timestamp((v_row.raw_data->>'created')::double precision)
+        when v_row.raw_data ? 'created'
+          then (v_row.raw_data->>'created')::timestamptz
+        else null
+      end,
+      now()
+    )
+  )
+  on conflict (tenant_id, wati_message_id) do nothing;
+
+  get diagnostics v_rows_inserted = row_count;
 
   return jsonb_build_object(
-    'tenant_id', v_survivor_tenant_id,
-    'survivor_contact_id', p_survivor_contact_id,
-    'loser_contact_id', p_loser_contact_id,
-    'messages_moved', v_messages_moved,
-    'provider_keys_moved', v_provider_keys_moved,
-    'duplicate_provider_keys_deleted', v_duplicate_provider_keys_deleted,
-    'contact_deleted', v_contact_deleted = 1
+    'status', case when v_rows_inserted > 0 then 'success' else 'duplicate' end,
+    'staging_id', p_staging_id,
+    'tenant_id', v_row.tenant_id,
+    'contact_id', v_contact_id,
+    'wati_message_id', v_row.wati_message_id
   );
+end;
+$$ language plpgsql;
+
+
+-- Update the per-tenant webhook health aggregates in ops.webhook_processing_status.
+-- Increments counters atomically. Called from the wati-webhook edge function.
+create or replace function public.update_webhook_status(
+  p_tenant_id bigint,
+  p_status text  -- 'success', 'skipped', or 'failed'
+)
+returns void as $$
+begin
+  insert into ops.webhook_processing_status (
+    tenant_id,
+    last_received_at,
+    last_processed_at,
+    last_status,
+    total_received,
+    total_succeeded,
+    total_failed,
+    updated_at
+  )
+  values (
+    p_tenant_id,
+    now(),
+    now(),
+    p_status,
+    1,
+    case when p_status in ('success', 'skipped') then 1 else 0 end,
+    case when p_status = 'failed' then 1 else 0 end,
+    now()
+  )
+  on conflict (tenant_id)
+  do update set
+    last_received_at = now(),
+    last_processed_at = now(),
+    last_status = excluded.last_status,
+    total_received = ops.webhook_processing_status.total_received + 1,
+    total_succeeded = ops.webhook_processing_status.total_succeeded
+      + case when p_status in ('success', 'skipped') then 1 else 0 end,
+    total_failed = ops.webhook_processing_status.total_failed
+      + case when p_status = 'failed' then 1 else 0 end,
+    updated_at = now();
 end;
 $$ language plpgsql;
 
