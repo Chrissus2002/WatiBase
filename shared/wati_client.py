@@ -55,6 +55,20 @@ class WatiClient:
             api_token=row["wati_api_token"],
         )
     
+    def _request_with_retry(self, session, url, max_retries=3, retry_wait=60):
+        for attempt in range(max_retries):
+            response = session.get(url)
+            if response.status_code == 429:
+                if attempt < max_retries - 1:
+                    print(f"Rate limited (429). Waiting {retry_wait}s before retry ({attempt + 1}/{max_retries})...")
+                    time.sleep(retry_wait)
+                    continue
+                raise Exception(f"Rate limited at url: {url} after {max_retries} retries")
+            if response.status_code != 200:
+                raise Exception(f"Request failed at url: {url} (status {response.status_code})")
+            return response
+        raise Exception(f"Request failed at url: {url} after {max_retries} retries")
+
     def get_contacts(self, max_pages: int = None) -> list:
 
         all_contacts = []
@@ -67,9 +81,7 @@ class WatiClient:
                 if max_pages is not None and pages_fetched >= max_pages:
                     break
                 print(url)
-                response = session.get(url)
-                if response.status_code != 200:
-                    raise Exception(f"Failed to request contacts at url: {url} (status {response.status_code})")
+                response = self._request_with_retry(session, url)
                 data = response.json()
                 all_contacts.extend(data.get("contact_list", []))
                 pages_fetched += 1
@@ -89,9 +101,7 @@ class WatiClient:
 
             while True:
                 url = self.url + f"/api/v1/getMessages/{phone_number}?pageSize={page_size}&page={page_number}"
-                response = session.get(url)
-                if response.status_code != 200:
-                    raise Exception(f"Failed to request messages at url: {url} (status {response.status_code})")
+                response = self._request_with_retry(session, url)
                 data = response.json()
                 if phone_number not in all_messages:
                     all_messages[phone_number] = []
@@ -101,7 +111,7 @@ class WatiClient:
                 if len(items) < page_size:
                     break
                 page_number += 1
-            
+
             return all_messages
 
 def main():

@@ -138,12 +138,6 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
-
-def handle_not_implemented(args: argparse.Namespace) -> int:
-    print(f"{args.command_path} is scaffolded but not implemented yet.", file=sys.stderr, flush=True)
-    return 2
-
-
 def handle_test_connection(args: argparse.Namespace) -> int:
     try:
         response = get_supabase_client().test_connection()
