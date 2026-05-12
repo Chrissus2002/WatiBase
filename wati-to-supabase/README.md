@@ -46,9 +46,8 @@ For the connector product, the center of gravity is `staging` + `canonical` +
 
 ## Near-Term Goal
 
-Turn the current Dialo ingestion subsystem into a clearly standalone connector
-with its own docs, runtime boundary, and Supabase contract, while keeping it in
-this repo for now.
+Create an ingestion subsystem as a clearly standalone connector
+with its own docs, runtime boundary, and Supabase contract.
 
 ## Scaffold
 
