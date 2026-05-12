@@ -15,13 +15,13 @@ code_branch:
 
 
 
-# Port dialo-cx phone identity and smart contact deduplication
+# Port the previous codebase phone identity and smart contact deduplication
 
 ## TL;DR
 
 - Wati-Base currently deduplicates contacts with a simple digits-only key
   (`regexp_replace(phone, '\D', '', 'g')`)
-- Port the connector-owned phone identity model from `dialo-cx` so Wati-Base
+- Port the connector-owned phone identity model from `the previous codebase` so Wati-Base
   can:
   - preserve the legacy Wati-compatible lookup semantics (`52... -> 521...`)
   - store richer canonical identity fields (`phone_identity_key`, `phone_e164`,
@@ -35,7 +35,7 @@ code_branch:
 
 ## Problem
 
-Wati-Base does not yet have the same phone identity behavior as `dialo-cx`.
+Wati-Base does not yet have the same phone identity behavior as `the previous codebase`.
 
 Today the connector uses:
 
@@ -44,7 +44,7 @@ Today the connector uses:
 - `canonical.contacts.phone_normalized` as the sole dedupe key
 - `canonical.contacts.phone_raw` as the phone later used to fetch messages
 
-This is materially weaker than the current `dialo-cx` model:
+This is materially weaker than the current `the previous codebase` model:
 
 1. Mexican mobile numbers can be represented by Wati as either `52...` or
    `521...`; the current Wati-Base normalizer treats these as different contacts
@@ -60,7 +60,7 @@ The result is that Wati-Base can appear to work on clean data while still
 splitting one person into multiple contacts or failing to match the exact phone
 representation Wati expects for `/getMessages`.
 
-## Source of Truth To Port From dialo-cx
+## Source of Truth To Port From the previous codebase
 
 Port the connector-owned pieces from these files:
 
@@ -71,7 +71,7 @@ Port the connector-owned pieces from these files:
 | `database/03_silver_layer.sql` | contact identity fields and indexes that belong in connector-owned canonical data |
 | `tests/unit/test_phone_identity.py` | identity behavior tests |
 | `tests/fixtures/phone_identity_cases.json` | cross-format / multi-country fixture set |
-| archived design notes in `.molds/archive/dialo-6.md` | placement of `default_phone_region` on connector install, plus the rule that reconciliation is connector-owned enrichment, not app logic |
+| archived design notes | placement of `default_phone_region` on connector install, plus the rule that reconciliation is connector-owned enrichment, not app logic |
 
 Do **not** blindly copy schema names (`silver`, `gold`) or app-layer helpers.
 Adapt the connector-owned semantics into Wati-Base's `public` / `canonical` /
@@ -79,8 +79,8 @@ Adapt the connector-owned semantics into Wati-Base's `public` / `canonical` /
 
 ## Solution
 
-Port the hardened normalization from `dialo-cx`, but do it in a way that fits
-Wati-Base's current architecture instead of trying to recreate `dialo-cx`
+Port the hardened normalization from `the previous codebase`, but do it in a way that fits
+Wati-Base's current architecture instead of trying to recreate `the previous codebase`
 verbatim.
 
 Locked design:
@@ -103,14 +103,14 @@ This is the right shape because:
 - Wati-Base already has a working staging -> SQL promotion pipeline
 - we do not want canonical row creation to fail just because parsing is
   ambiguous
-- we do want the hardened `dialo-cx` identity semantics to become the source of
+- we do want the hardened `the previous codebase` identity semantics to become the source of
   truth for the connector
 
 ## Exactly What To Port
 
 ### 1. Legacy Wati lookup semantics
 
-Port the legacy Wati-compatible lookup rule from `dialo-cx`:
+Port the legacy Wati-compatible lookup rule from `the previous codebase`:
 
 - strip non-digits
 - if the number starts with `52` but not `521`, rewrite it to `521...`
@@ -125,14 +125,14 @@ This must become Wati-Base's compatibility normalizer for:
 Concrete requirement:
 
 - `public.normalize_phone()` in Wati-Base must stop being digits-only and match
-  the `dialo-cx` legacy helper exactly for the lookup semantics that matter to
+  the `the previous codebase` legacy helper exactly for the lookup semantics that matter to
   Wati
 - the Python `legacy_wati_lookup_phone()` helper must mirror that same behavior
   so SQL joins and Python fetches cannot drift apart
 
 ### 2. Shared phone identity library
 
-Port `dialo-cx/scripts/phone_identity.py` into a connector-neutral Wati-Base
+Port `the previous codebase/scripts/phone_identity.py` into a connector-neutral Wati-Base
 module, likely `shared/phone_identity.py`, with at least:
 
 - `strip_to_digits()`
@@ -156,7 +156,7 @@ Required behavior:
 
 Important scope guard:
 
-- Port the library behavior, fixtures, and tests from `dialo-cx`
+- Port the library behavior, fixtures, and tests from `the previous codebase`
 - Do **not** port app/database helpers, Streamlit wrappers, or daemon-specific
   entrypoints that were only one consumer of this library
 
@@ -179,7 +179,7 @@ Concrete build implication:
 
 ### 4. Canonical contact identity fields
 
-Port the connector-owned identity fields from `dialo-cx silver.contacts` into
+Port the connector-owned identity fields from `the previous codebase silver.contacts` into
 `Wati-Base canonical.contacts`:
 
 - `phone_raw_primary`
@@ -200,14 +200,14 @@ the transition.
 
 Concrete migration note:
 
-- existing live contacts in Filippa will not have these fields populated until a
+- existing live contacts in existing will not have these fields populated until a
   contact resync updates them
 - build should rely on re-running `sync contacts` after schema changes rather
   than inventing a separate one-off migration command
 
 ### 5. Provider key mapping behavior
 
-Port the multi-key Wati mapping behavior concept from `dialo-cx` into
+Port the multi-key Wati mapping behavior concept from `the previous codebase` into
 `canonical.contact_provider_keys`.
 
 At minimum ensure this table can represent:
@@ -224,13 +224,13 @@ Pinned direction for Wati-Base:
 
 - keep generic table naming (`provider_phone` is acceptable if we document it as
   the provider lookup phone)
-- add the missing lifecycle fields from `dialo-cx`:
+- add the missing lifecycle fields from `the previous codebase`:
   - `is_primary`
   - `first_seen_at`
   - `last_seen_at`
 
 This avoids losing the generic connector shape while still porting the real
-many-to-one identity behavior that `dialo-cx` already proved out.
+many-to-one identity behavior that `the previous codebase` already proved out.
 
 ### 6. Contact import / promotion logic
 
@@ -294,16 +294,16 @@ Pinned rollout safety rule:
 - message promotion should join on `coalesce(c.wati_lookup_phone,
   c.phone_normalized)` against the stored staged conversation lookup phone
 
-That lets the rollout work on already-landed Filippa contacts while still
+That lets the rollout work on already-landed existing contacts while still
 moving the steady-state path to `wati_lookup_phone`.
 
 ### 8. Tests and fixtures
 
-Port the identity fixture coverage from `dialo-cx`, adapted to Wati-Base:
+Port the identity fixture coverage from `the previous codebase`, adapted to Wati-Base:
 
 - add unit tests for the shared phone identity library
 - bring over the fixture cases from
-  `dialo-cx/tests/fixtures/phone_identity_cases.json`
+  `the previous codebase/tests/fixtures/phone_identity_cases.json`
 - include explicit coverage for:
   - MX `52` vs `521`
   - US/GB E.164 normalization
@@ -324,7 +324,7 @@ Repo reality note:
 |------|--------|---------|------|
 | `database/init_db.sql` | Modify | add connector region field, contact identity fields, indexes, provider key fields if needed | yes |
 | `database/functions.sql` | Modify | port legacy Wati normalizer semantics and adapt promotion logic | yes |
-| `shared/phone_identity.py` | Create | neutral port of `dialo-cx` parser/identity helpers | yes |
+| `shared/phone_identity.py` | Create | neutral port of `the previous codebase` parser/identity helpers | yes |
 | `shared/batch_contact_import.py` | Modify | populate smart identity fields during/after contact sync | yes |
 | `shared/batch_message_import.py` | Modify | fetch messages via `wati_lookup_phone` | yes |
 | `shared/wati_client.py` | Maybe modify | only if needed for cleaner lookup-phone call sites; avoid unnecessary transport changes | skipped (not needed) |
@@ -365,7 +365,7 @@ core identity contract and making ingestion/backfill use it.
 
 ### Live verification
 
-Using Filippa test tenant `310131` on the self-hosted Supabase stack:
+Using existing test tenant `310131` on the self-hosted Supabase stack:
 
 1. Re-run a small contact sync
 2. Inspect a sample of contacts where the raw Wati phone varies by format
@@ -383,18 +383,18 @@ Using Filippa test tenant `310131` on the self-hosted Supabase stack:
 
 ## Implementation Notes
 
-- Treat `dialo-cx/scripts/phone_identity.py` as the semantic source of truth for
+- Treat `the previous codebase/scripts/phone_identity.py` as the semantic source of truth for
   the Python parser; do not re-invent a lighter version in Wati-Base
-- Treat `dialo-cx/database/05_functions.sql` as the semantic source of truth for
+- Treat `the previous codebase/database/05_functions.sql` as the semantic source of truth for
   the legacy Wati lookup normalizer; copy that behavior exactly into
   Wati-Base's `public.normalize_phone()`
 - Keep this mold scoped to core ingest/backfill correctness. If the build starts
   pulling in an identity refresh daemon, exact drift check, or manual merge UX,
   split a follow-up mold instead of letting this one sprawl
-- Source files are in `/Users/christianschipper/Workspace/github/Chrissus2002/V2_wati_filippa` (referred to as "dialo-cx" in this mold)
+- Source files were in the previous codebase repository
 
 ## Related Molds
 
 - `supawati-2` — explicitly deferred full phone normalization as future work
-- archived `dialo-6` design notes — source of the connector-scoped identity
+- archived design notes — source of the connector-scoped identity
   contract and `default_phone_region` placement
