@@ -1,70 +1,154 @@
-# SupaWati
+# WatiBase
 
-A CLI tool that syncs WhatsApp contact and message data from the [Wati](https://www.wati.io/) API into a [Supabase](https://supabase.com/) database. Fetch contacts, backfill message history, or download everything to local JSON files.
+A CLI tool that syncs WhatsApp contact and message data from [Wati](https://www.wati.io/) into a [Supabase](https://supabase.com/) (PostgreSQL) database.
+
+With it you can:
+
+- Import all your Wati contacts into Supabase
+- Backfill your full WhatsApp message history
+- Receive new messages in real time via a webhook
+- Export contacts or messages to local JSON files
 
 ## Prerequisites
 
-- Python 3.11+
-- A Supabase instance with credentials (URL + API key)
-- Wati API credentials (account ID, API URL, token)
+- **Python 3.11+**
+- A **Supabase** project (you'll need the URL and a service-role API key)
+- A **Wati** account (you'll need the API URL and API token)
 
-## Setup
+## Getting started
+
+All commands are run from this root directory using the `./wati-supabase` wrapper.
+
+### 1. Install dependencies
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-./wati-supabase setup              # interactive credential wizard
-./wati-supabase test-connection --tenant-id <ID>
 ```
+
+### 2. Initialize the database
+
+Run the schema file against your Supabase database to create the required tables and functions. You can do this through the Supabase SQL Editor:
+
+1. Open your Supabase project dashboard
+2. Go to **SQL Editor**
+3. Paste the contents of `database/init_db.sql` and run it
+4. Paste the contents of `database/functions.sql` and run it
+
+### 3. Configure credentials
+
+Run the interactive setup wizard. It will ask for your Supabase URL, API key, Wati API URL, Wati token, and tenant details. Everything is saved into the database and a local `.env` file.
+
+```bash
+./wati-supabase setup
+```
+
+### 4. Verify the connection
+
+```bash
+./wati-supabase test-connection
+```
+
+### 5. Sync your data
+
+```bash
+# Import contacts from Wati
+./wati-supabase sync contacts --tenant-id <ID>
+
+# Backfill message history (runs in the background, resumable)
+./wati-supabase backfill --tenant-id <ID>
+```
+
+The `--tenant-id` value is printed at the end of the `setup` step.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `setup` | Configure Supabase and Wati credentials for a tenant |
-| `test-connection` | Verify Supabase connectivity |
-| `status` | Show connector status for a tenant |
-| `watch status` | Continuously poll and display status |
-| `sync contacts` | Import contacts from Wati into Supabase |
-| `backfill` | Fetch historical messages for all contacts (resumable) |
-| `to-file contacts` | Download contacts as JSON |
-| `to-file messages` | Download messages as JSON (single phone or all) |
-| `logs` | Inspect, list, or tail background job logs |
-
-## Usage
+### Sync and backfill
 
 ```bash
-# Sync contacts from Wati into Supabase
-./wati-supabase sync contacts --tenant-id 310131
+# Import contacts from Wati into Supabase
+./wati-supabase sync contacts --tenant-id <ID>
 
-# Backfill message history
-./wati-supabase backfill --tenant-id 310131
+# Import contacts but only fetch the first N pages (useful for testing)
+./wati-supabase sync contacts --tenant-id <ID> --limit 2
 
-# Export contacts to a file
-./wati-supabase to-file contacts --tenant-id 310131 --output contacts.json
+# Backfill all message history (runs in the background)
+./wati-supabase backfill --tenant-id <ID>
+
+# Resume an interrupted backfill
+./wati-supabase backfill --tenant-id <ID> --resume <JOB_ID>
+```
+
+### Monitoring
+
+```bash
+# Show connector status (credentials, tenant info)
+./wati-supabase status --tenant-id <ID>
+
+# Continuously poll status (refreshes every 10s, Ctrl+C to stop)
+./wati-supabase watch status --tenant-id <ID>
+./wati-supabase watch status --tenant-id <ID> --interval 30
+```
+
+### Exporting to files
+
+```bash
+# Download all contacts as JSON
+./wati-supabase to-file contacts --tenant-id <ID> --output contacts.json
+
+# Download messages for a single phone number
+./wati-supabase to-file messages --tenant-id <ID> --phone 5215512345678
+
+# Download messages for all contacts (one file per contact)
+./wati-supabase to-file messages --tenant-id <ID> --all
+```
+
+### Logs
+
+Background jobs (like `backfill`) write logs to the `logs/` directory.
+
+```bash
+# List available log files
+./wati-supabase logs --list
+
+# View a specific log
+./wati-supabase logs --file backfill_1_20250101_120000.log
+
+# Show only the last 50 lines
+./wati-supabase logs --file backfill_1_20250101_120000.log --tail
 ```
 
 ## How it works
 
 Data flows through a layered pipeline:
 
-1. **Wati API** -- raw contacts and messages are fetched in batches
-2. **Staging** -- immutable snapshots stored in Supabase
-3. **Canonical** -- normalized, deduplicated records with E.164 phone identities
-4. **Analytics** -- downstream reporting projections
+```
+Wati API  -->  Staging (raw snapshots)  -->  Canonical (normalized)
+```
 
-Background jobs (like `backfill`) are tracked and can resume from checkpoints if interrupted. The system is fully multi-tenant -- each tenant gets its own Wati connector config and isolated data.
+1. **Staging** -- Raw data from Wati is stored as-is. Contacts are upserted (latest snapshot wins), messages are append-only.
+2. **Canonical** -- A database function promotes staged data into clean, normalized records. Phone numbers are parsed into E.164 format and deduplicated.
+3. **Ops** -- Background jobs are tracked in the `ops.import_jobs` table so backfills can resume from where they left off if interrupted.
 
-## Live identity rollout
+### Real-time webhooks
+A Supabase Edge Function at `supabase/functions/wati-webhook/` can receive live message events from Wati. Once deployed, new messages flow into the same staging-to-canonical pipeline automatically. See `supabase/functions/wati-webhook/index.ts` for the code, to deploy copy the content of the file to a new edge function in the Supabase dashboard.
 
-Existing deployments created before `supawati-10` need an explicit upgrade
-sequence; rerunning `database/init_db.sql` is not enough.
+For further details, see `supabase/functions/wati-webhook/README.md`.
 
-Recommended order for live installs:
+## Project structure
 
-1. apply `database/upgrade_identity_schema.sql`
-2. reapply `database/functions.sql`
-3. run `wati-supabase repair contacts --tenant-id <id>`
-4. run `wati-supabase sync contacts --tenant-id <id> --limit 1`
-
-Use `wati-supabase repair contacts --tenant-id <id> --dry-run` first when you
-want a preview of the planned merge/update counts.
+```
+.
+├── scripts/              # CLI entry point
+├── shared/               # Core Python modules (API client, importers, phone parsing)
+├── database/             # SQL schema, functions, and migrations
+│   ├── init_db.sql       # Full schema (run this on a fresh database)
+│   ├── functions.sql     # SQL functions for data promotion
+│   └── drop_db.sql       # Drop all tables and functions
+├── supabase/functions/   # Supabase Edge Function for webhooks
+├── tests/                # Unit tests
+├── wati-supabase         # Shell wrapper (entry point)
+├── requirements.txt      # Python dependencies
+└── .env                  # Local credentials (created by setup, not committed)
+```

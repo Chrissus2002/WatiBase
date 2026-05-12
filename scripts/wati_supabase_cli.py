@@ -88,14 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
     watch_status_parser.add_argument("--interval", type=int, default=10, help="Refresh interval in seconds")
     watch_status_parser.set_defaults(handler=handle_watch_status)
 
-    sync_parser = subparsers.add_parser("sync", help="Run connector sync operations")
+    sync_parser = subparsers.add_parser("sync", help="Import contacts from Wati into Supabase")
     sync_subparsers = sync_parser.add_subparsers(dest="sync_command", required=True)
     sync_contacts_parser = sync_subparsers.add_parser("contacts", help="Sync contacts from Wati")
     sync_contacts_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
     sync_contacts_parser.add_argument("--limit", type=int, default=None, help="Max number of Wati contact pages to import (for testing)")
     sync_contacts_parser.set_defaults(handler=handle_sync_contacts)
 
-    backfill_parser = subparsers.add_parser("backfill", help="Backfill historical messages")
+    backfill_parser = subparsers.add_parser("backfill", help="Import message history for all synced contacts")
     backfill_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
     backfill_parser.add_argument("--limit", type=int, default=None, help="Max pages of canonical contacts to process (for testing)")
     backfill_parser.add_argument("--resume", type=str, default=None, help="Resume a failed/interrupted job by job_id")
