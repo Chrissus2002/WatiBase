@@ -63,6 +63,8 @@ class StatusSnapshot:
     wati_api_url: str | None
     wati_api_token: str | None
     default_phone_region: str | None
+    contact_count: int
+    message_count: int
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -76,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     test_parser = subparsers.add_parser("test-connection", help="Verify Supabase connectivity")
     test_parser.set_defaults(handler=handle_test_connection)
+
+    tenants_parser = subparsers.add_parser("tenants", help="List all configured tenants")
+    tenants_parser.set_defaults(handler=handle_tenants)
 
     status_parser = subparsers.add_parser("status", help="Show connector status for a tenant")
     status_parser.add_argument("--tenant-id", type=int, required=True, help="Tenant ID")
@@ -153,6 +158,34 @@ def handle_test_connection(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_tenants(args: argparse.Namespace) -> int:
+    try:
+        db = get_supabase_client().get_client()
+        tenants = (
+            db.table("tenant")
+            .select("tenant_id, name, slug")
+            .order("tenant_id")
+            .execute()
+        )
+        rows = tenants.data or []
+        if not rows:
+            print("No tenants configured.", flush=True)
+            return 0
+
+        # Header
+        print(f"{'ID':<10} {'Name':<30} {'Slug':<20}", flush=True)
+        print(f"{'-'*10} {'-'*30} {'-'*20}", flush=True)
+        for row in rows:
+            tid = row["tenant_id"]
+            name = row.get("name") or "-"
+            slug = row.get("slug") or "-"
+            print(f"{tid:<10} {name:<30} {slug:<20}", flush=True)
+        return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+
 def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
     supabase_url = runtime_supabase_url()
     supabase_key = runtime_supabase_key()
@@ -182,6 +215,21 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
     connector_rows = connector_response.data or []
     connector = connector_rows[0] if connector_rows else {}
 
+    contact_count_resp = (
+        db_client.get_client().schema("canonical").table("contacts")
+        .select("contact_id", count="exact")
+        .eq("tenant_id", tenant_id)
+        .limit(0)
+        .execute()
+    )
+    message_count_resp = (
+        db_client.get_client().schema("canonical").table("messages")
+        .select("message_id", count="exact")
+        .eq("tenant_id", tenant_id)
+        .limit(0)
+        .execute()
+    )
+
     return StatusSnapshot(
         supabase_url=supabase_url,
         supabase_key=supabase_key,
@@ -191,6 +239,8 @@ def load_status_snapshot(tenant_id: int) -> StatusSnapshot:
         wati_api_url=connector.get("wati_api_url"),
         wati_api_token=connector.get("wati_api_token"),
         default_phone_region=connector.get("default_phone_region"),
+        contact_count=contact_count_resp.count or 0,
+        message_count=message_count_resp.count or 0,
     )
 
 
@@ -217,6 +267,10 @@ def format_status(snapshot: StatusSnapshot) -> str:
     lines.append(f"  URL:    {snapshot.wati_api_url or 'not configured'}")
     lines.append(f"  Token:  {mask_secret(snapshot.wati_api_token)}")
     lines.append(f"  Region: {snapshot.default_phone_region or 'not set'}")
+    lines.append("")
+    lines.append("Data")
+    lines.append(f"  Contacts: {snapshot.contact_count:,}")
+    lines.append(f"  Messages: {snapshot.message_count:,}")
 
     return "\n".join(lines) + "\n"
 
