@@ -2,27 +2,19 @@
 -- numbers (52X → 521X). Mirrors the Python legacy_wati_lookup_phone() helper
 -- so SQL joins and Python fetches never drift apart.
 -- Lives in public so PostgREST can expose it via rpc if needed.
+-- Written in pure SQL (not PL/pgSQL) so PostgreSQL can inline it and avoid
+-- per-call interpreter overhead when called thousands of times in a query.
 create or replace function public.normalize_phone(p_phone text)
 returns text as $$
-declare
-  v_digits text;
-begin
-  if p_phone is null then
-    return null;
-  end if;
-
-  -- Strip all non-digits
-  v_digits := regexp_replace(p_phone, '[^0-9]', '', 'g');
-
-  -- Fix Mexican mobile numbers: 52XXXXXXXXXX → 521XXXXXXXXXX
-  -- If starts with '52' but third digit is not '1', insert '1' after '52'
-  if left(v_digits, 2) = '52' and left(v_digits, 3) != '521' then
-    v_digits := '521' || substring(v_digits from 3);
-  end if;
-
-  return v_digits;
-end;
-$$ language plpgsql immutable;
+  select case
+    when p_phone is null then null
+    -- Mexican mobile fix: starts with '52' but third digit is not '1' → insert '1'
+    when left(regexp_replace(p_phone, '[^0-9]', '', 'g'), 2) = '52'
+     and left(regexp_replace(p_phone, '[^0-9]', '', 'g'), 3) != '521'
+    then '521' || substring(regexp_replace(p_phone, '[^0-9]', '', 'g') from 3)
+    else regexp_replace(p_phone, '[^0-9]', '', 'g')
+  end;
+$$ language sql immutable;
 
 
 -- Promote contacts from staging.contacts_raw_data into canonical.contacts
@@ -47,26 +39,36 @@ begin
 
   raise notice 'Processing batch % for tenant %', p_batch_id, v_tenant_id;
 
-  -- Deduplicate within the batch by normalized phone (latest last_seen_at wins).
+  -- Step 1: Materialise the batch with normalize_phone computed exactly once per
+  -- row. Using a temp table avoids repeated PL/pgSQL calls and lets the planner
+  -- index-scan the smaller dataset for the joins that follow.
+  create temp table _batch_contacts on commit drop as
+  select
+    tenant_id,
+    wati_contact_id,
+    raw_data,
+    public.normalize_phone(
+      coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')
+    ) as normalized_phone,
+    coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') as raw_phone,
+    coalesce(raw_data->>'fullName', raw_data->>'name') as contact_name,
+    last_seen_at
+  from staging.contacts_raw_data
+  where batch_id = p_batch_id
+    and coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') is not null;
+
+  -- Step 2: Deduplicate within the batch by normalized phone (latest last_seen_at wins).
   -- Resolve existing provider identity before falling back to normalized phone.
   with contacts_to_process as (
-    select distinct on (
-      tenant_id,
-      public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber'))
-    )
+    select distinct on (tenant_id, normalized_phone)
       tenant_id,
       wati_contact_id,
       raw_data,
-      public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')) as normalized_phone,
-      coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') as raw_phone,
-      coalesce(raw_data->>'fullName', raw_data->>'name') as contact_name
-    from staging.contacts_raw_data
-    where batch_id = p_batch_id
-      and coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber') is not null
-    order by
-      tenant_id,
-      public.normalize_phone(coalesce(raw_data->>'wAid', raw_data->>'phone', raw_data->>'whatsappNumber')),
-      last_seen_at desc
+      normalized_phone,
+      raw_phone,
+      contact_name
+    from _batch_contacts
+    order by tenant_id, normalized_phone, last_seen_at desc
   ),
   resolved as (
     select
@@ -83,6 +85,15 @@ begin
       on c_by_phone.tenant_id = ctp.tenant_id
       and c_by_phone.phone_normalized = ctp.normalized_phone
   ),
+  -- Pre-compute the set of phone numbers that are already owned by a contact
+  -- outside this batch, so the UPDATE can check membership instead of running
+  -- a correlated EXISTS per row.
+  occupied_phones as (
+    select phone_normalized, contact_id
+    from canonical.contacts
+    where tenant_id = v_tenant_id
+      and phone_normalized is not null
+  ),
   updated as (
     update canonical.contacts c
     set
@@ -91,11 +102,9 @@ begin
         when resolved.normalized_phone is null then c.phone_normalized
         when c.phone_normalized = resolved.normalized_phone then c.phone_normalized
         when exists (
-          select 1
-          from canonical.contacts other
-          where other.tenant_id = c.tenant_id
-            and other.phone_normalized = resolved.normalized_phone
-            and other.contact_id <> c.contact_id
+          select 1 from occupied_phones op
+          where op.phone_normalized = resolved.normalized_phone
+            and op.contact_id <> c.contact_id
         ) then c.phone_normalized
         else resolved.normalized_phone
       end,
@@ -365,6 +374,50 @@ begin
     updated_at = now();
 end;
 $$ language plpgsql;
+
+
+-- Bulk-update identity fields on canonical.contacts in a single statement.
+-- Accepts a JSONB array of objects, each with a "contact_id" key and any
+-- subset of the identity columns to set. Called from Python's
+-- ContactIdentityRepair to avoid thousands of individual HTTP round-trips.
+create or replace function public.bulk_update_contact_identity(p_updates jsonb)
+returns integer as $$
+declare
+  v_count integer;
+begin
+  update canonical.contacts c
+  set
+    phone_raw_primary    = coalesce(u.val->>'phone_raw_primary',    c.phone_raw_primary),
+    phone_identity_key   = coalesce(u.val->>'phone_identity_key',   c.phone_identity_key),
+    phone_e164           = coalesce(u.val->>'phone_e164',           c.phone_e164),
+    normalization_status = coalesce(u.val->>'normalization_status', c.normalization_status),
+    normalization_region = coalesce(u.val->>'normalization_region', c.normalization_region),
+    wati_lookup_phone    = coalesce(u.val->>'wati_lookup_phone',    c.wati_lookup_phone),
+    wati_contact_id      = coalesce(u.val->>'wati_contact_id',      c.wati_contact_id),
+    phone_normalized     = coalesce(u.val->>'phone_normalized',     c.phone_normalized),
+    updated_at           = now()
+  from jsonb_array_elements(p_updates) as u(val)
+  where c.contact_id = (u.val->>'contact_id')::uuid;
+
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$ language plpgsql;
+
+
+-- Return message counts grouped by contact_id for a given tenant.
+-- Replaces the previous approach of fetching all message rows to Python
+-- and counting client-side, which transferred massive amounts of data.
+create or replace function public.get_message_counts_by_contact(p_tenant_id bigint)
+returns table(contact_id uuid, cnt bigint) as $$
+begin
+  return query
+    select m.contact_id, count(*) as cnt
+    from canonical.messages m
+    where m.tenant_id = p_tenant_id
+    group by m.contact_id;
+end;
+$$ language plpgsql stable;
 
 
 grant execute on all functions in schema public to service_role;

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
@@ -234,10 +234,19 @@ class ContactIdentityRepair:
     def run(self, batch_id: str | None = None, dry_run: bool = False) -> dict[str, Any]:
         client = self.supabase_client.get_client()
         default_region = self._load_default_phone_region(client)
-        contacts = self._load_contacts(client)
-        provider_keys = self._load_provider_keys(client)
+
+        # When a batch_id is provided, only load contacts/keys relevant to that batch
+        # instead of fetching the entire tenant and filtering in Python.
+        if batch_id:
+            restrict_provider_contact_ids = self._load_batch_provider_contact_ids(client, batch_id)
+            contacts = self._load_contacts(client, batch_id=batch_id)
+            provider_keys = self._load_provider_keys(client, restrict_provider_contact_ids=restrict_provider_contact_ids)
+        else:
+            restrict_provider_contact_ids = None
+            contacts = self._load_contacts(client)
+            provider_keys = self._load_provider_keys(client)
+
         message_counts = self._load_message_counts(client)
-        restrict_provider_contact_ids = self._load_batch_provider_contact_ids(client, batch_id) if batch_id else None
 
         plan = plan_contact_repairs(
             contacts=contacts,
@@ -263,7 +272,9 @@ class ContactIdentityRepair:
             return summary
 
         now = datetime.now(timezone.utc).isoformat()
+        batch_size = 50
 
+        # Merges must stay sequential (each merge may affect the next)
         for merge in plan.merges:
             for loser_contact_id in merge.loser_contact_ids:
                 client.schema("public").rpc(
@@ -273,52 +284,69 @@ class ContactIdentityRepair:
                         "p_loser_contact_id": loser_contact_id,
                     },
                 ).execute()
+        
+        # Bulk contact updates via a single RPC call per batch instead of one
+        # HTTP request per contact (which was ~10K requests for large imports).
+        if plan.contact_updates:
+            update_payloads = []
+            for contact_update in plan.contact_updates:
+                payload = dict(contact_update.fields)
+                payload["contact_id"] = contact_update.contact_id
+                update_payloads.append(payload)
 
-        for contact_update in plan.contact_updates:
-            update_fields = dict(contact_update.fields)
-            update_fields["updated_at"] = now
-            client.schema("canonical").table("contacts").update(update_fields).eq(
-                "contact_id",
-                contact_update.contact_id,
-            ).execute()
+            for i in range(0, len(update_payloads), batch_size):
+                batch = update_payloads[i:i + batch_size]
+                client.schema("public").rpc(
+                    "bulk_update_contact_identity",
+                    {"p_updates": batch},
+                ).execute()
+        
+        # Batch provider key upserts: resolve existing IDs in one query, then upsert
+        if plan.provider_key_updates:
+            # Collect all provider_contact_ids that need existing ID lookup
+            needs_lookup = [pku for pku in plan.provider_key_updates if pku.existing_id is None]
+            existing_id_map: dict[str, str] = {}
+            if needs_lookup:
+                lookup_ids = [pku.provider_contact_id for pku in needs_lookup]
+                for i in range(0, len(lookup_ids), batch_size):
+                    batch_ids = lookup_ids[i:i + batch_size]
+                    existing_rows = (
+                        client.schema("canonical").table("contact_provider_keys")
+                        .select("id, provider_contact_id")
+                        .eq("tenant_id", self.db_tenant_id)
+                        .eq("provider", "wati")
+                        .in_("provider_contact_id", batch_ids)
+                        .execute()
+                    ).data or []
+                    for row in existing_rows:
+                        existing_id_map[row["provider_contact_id"]] = row["id"]
 
-        for provider_key_update in plan.provider_key_updates:
-            existing_id = provider_key_update.existing_id
-            if existing_id is None:
-                existing_rows = (
-                    client.schema("canonical").table("contact_provider_keys")
-                    .select("id")
-                    .eq("tenant_id", self.db_tenant_id)
-                    .eq("provider", "wati")
-                    .eq("provider_contact_id", provider_key_update.provider_contact_id)
-                    .limit(1)
-                    .execute()
-                ).data or []
-                if existing_rows:
-                    existing_id = existing_rows[0]["id"]
+            # Build upsert rows for all provider key updates
+            upsert_rows = []
+            for pku in plan.provider_key_updates:
+                existing_id = pku.existing_id or existing_id_map.get(pku.provider_contact_id)
+                row = {
+                    "contact_id": pku.contact_id,
+                    "tenant_id": self.db_tenant_id,
+                    "provider": "wati",
+                    "provider_contact_id": pku.provider_contact_id,
+                    "provider_phone": pku.provider_phone,
+                    "is_primary": pku.is_primary,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                }
+                if existing_id is not None:
+                    row["id"] = existing_id
+                else:
+                    row["first_seen_at"] = now
+                upsert_rows.append(row)
 
-            if existing_id is not None:
-                client.schema("canonical").table("contact_provider_keys").update(
-                    {
-                        "contact_id": provider_key_update.contact_id,
-                        "provider_phone": provider_key_update.provider_phone,
-                        "is_primary": provider_key_update.is_primary,
-                        "updated_at": now,
-                    }
-                ).eq("id", existing_id).execute()
-            else:
-                client.schema("canonical").table("contact_provider_keys").insert(
-                    {
-                        "contact_id": provider_key_update.contact_id,
-                        "tenant_id": self.db_tenant_id,
-                        "provider": "wati",
-                        "provider_contact_id": provider_key_update.provider_contact_id,
-                        "provider_phone": provider_key_update.provider_phone,
-                        "is_primary": provider_key_update.is_primary,
-                        "first_seen_at": now,
-                        "last_seen_at": now,
-                        "updated_at": now,
-                    }
+            # Upsert in batches
+            for i in range(0, len(upsert_rows), batch_size):
+                batch = upsert_rows[i:i + batch_size]
+                client.schema("canonical").table("contact_provider_keys").upsert(
+                    batch,
+                    on_conflict="tenant_id,provider,provider_contact_id",
                 ).execute()
 
         return summary
@@ -353,38 +381,59 @@ class ContactIdentityRepair:
             if provider_contact_id is not None
         }
 
-    def _load_contacts(self, client) -> list[dict[str, Any]]:
-        return self._fetch_paginated(
-            lambda: client.schema("canonical").table("contacts")
-            .select(
-                "contact_id, tenant_id, batch_id, phone_normalized, phone_raw, phone_raw_primary, "
-                "phone_identity_key, phone_e164, normalization_status, normalization_region, "
-                "wati_lookup_phone, wati_contact_id, source, created_at, updated_at"
+    def _load_contacts(self, client, batch_id: str | None = None) -> list[dict[str, Any]]:
+        def query_factory():
+            q = (
+                client.schema("canonical").table("contacts")
+                .select(
+                    "contact_id, tenant_id, batch_id, phone_normalized, phone_raw, phone_raw_primary, "
+                    "phone_identity_key, phone_e164, normalization_status, normalization_region, "
+                    "wati_lookup_phone, wati_contact_id, source, created_at, updated_at"
+                )
+                .eq("tenant_id", self.db_tenant_id)
             )
-            .eq("tenant_id", self.db_tenant_id)
-            .order("created_at")
-        )
+            if batch_id is not None:
+                q = q.eq("batch_id", batch_id)
+            return q.order("created_at")
+        return self._fetch_paginated(query_factory)
 
-    def _load_provider_keys(self, client) -> list[dict[str, Any]]:
-        return self._fetch_paginated(
-            lambda: client.schema("canonical").table("contact_provider_keys")
-            .select(
-                "id, contact_id, provider_contact_id, provider_phone, is_primary, "
-                "first_seen_at, last_seen_at"
-            )
-            .eq("tenant_id", self.db_tenant_id)
-            .eq("provider", "wati")
-            .order("provider_contact_id")
-        )
+    def _load_provider_keys(
+        self, client, restrict_provider_contact_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if restrict_provider_contact_ids is not None and len(restrict_provider_contact_ids) <= 500:
+            # Filter server-side when the set is small enough for an IN clause
+            def query_factory():
+                return (
+                    client.schema("canonical").table("contact_provider_keys")
+                    .select(
+                        "id, contact_id, provider_contact_id, provider_phone, is_primary, "
+                        "first_seen_at, last_seen_at"
+                    )
+                    .eq("tenant_id", self.db_tenant_id)
+                    .eq("provider", "wati")
+                    .in_("provider_contact_id", list(restrict_provider_contact_ids))
+                    .order("provider_contact_id")
+                )
+        else:
+            def query_factory():
+                return (
+                    client.schema("canonical").table("contact_provider_keys")
+                    .select(
+                        "id, contact_id, provider_contact_id, provider_phone, is_primary, "
+                        "first_seen_at, last_seen_at"
+                    )
+                    .eq("tenant_id", self.db_tenant_id)
+                    .eq("provider", "wati")
+                    .order("provider_contact_id")
+                )
+        return self._fetch_paginated(query_factory)
 
     def _load_message_counts(self, client) -> dict[str, int]:
-        rows = self._fetch_paginated(
-            lambda: client.schema("canonical").table("messages")
-            .select("contact_id")
-            .eq("tenant_id", self.db_tenant_id)
-            .order("contact_id")
-        )
-        return dict(Counter(str(row["contact_id"]) for row in rows))
+        result = client.schema("public").rpc(
+            "get_message_counts_by_contact",
+            {"p_tenant_id": self.db_tenant_id},
+        ).execute()
+        return {str(row["contact_id"]): int(row["cnt"]) for row in (result.data or [])}
 
     def _fetch_paginated(self, query_factory) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

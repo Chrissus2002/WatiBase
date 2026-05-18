@@ -65,7 +65,7 @@ class BatchContactImport:
             ).execute()
             promotion = rpc_result.data
             upserted_canonical = promotion.get("contacts_processed", 0)
-
+            
             # Step 3: Enrich canonical contacts with smart identity fields
             repair_summary = ContactIdentityRepair(self.supabase_client, self.db_tenant_id).run(
                 batch_id=batch_id,

@@ -77,6 +77,9 @@ create table if not exists staging.contacts_raw_data (
     constraint uq_staging_contact_per_tenant unique (tenant_id, wati_contact_id)
 );
 
+create index if not exists idx_staging_contacts_batch
+    on staging.contacts_raw_data (batch_id);
+
 -- Messages are an event log — append-only, immutable once captured.
 create table if not exists staging.messages_raw_data (
     id uuid not null default gen_random_uuid() primary key,
@@ -89,6 +92,9 @@ create table if not exists staging.messages_raw_data (
 
     constraint uq_staging_message_per_tenant unique (tenant_id, wati_message_id)
 );
+
+create index if not exists idx_staging_messages_batch
+    on staging.messages_raw_data (batch_id);
 
 
 -- ============================================================
