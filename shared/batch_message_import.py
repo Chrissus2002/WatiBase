@@ -5,7 +5,17 @@ import time
 from datetime import datetime, timezone
 
 from supabase_client import SupabaseClient
-from wati_client import WatiClient
+from wati_client import WatiClient, parse_wati_time
+
+
+def message_time(msg: dict) -> datetime | None:
+    """Return when a Wati message happened, preferring `timestamp` like promotion does."""
+    return parse_wati_time(msg.get("timestamp")) or parse_wati_time(msg.get("created"))
+
+
+def in_window(msg: dict, since: datetime, until: datetime) -> bool:
+    happened = message_time(msg)
+    return happened is not None and since <= happened < until
 
 
 class BatchMessageImport:
@@ -14,7 +24,20 @@ class BatchMessageImport:
         self.wati_client = wati_client
         self.db_tenant_id = db_tenant_id
 
-    def run(self, limit: int = None, resume_job_id: str = None) -> dict:
+    def run(
+        self,
+        limit: int = None,
+        resume_job_id: str = None,
+        since: datetime = None,
+        until: datetime = None,
+        wati_contact_ids: list[str] = None,
+    ) -> dict:
+        """Import message history into canonical.
+
+        With `since`/`until`, only messages inside that window are staged, and
+        `wati_contact_ids` limits which contacts are fetched. This recovers a
+        webhook outage without re-staging the whole history.
+        """
         client = self.supabase_client.get_client()
         offset = 0
         page_size = 1000
@@ -27,7 +50,7 @@ class BatchMessageImport:
 
             query = (client.schema("canonical")
             .table("contacts")
-            .select("phone_raw, wati_lookup_phone")
+            .select("phone_raw, wati_lookup_phone, wati_contact_id")
             .eq("tenant_id", self.db_tenant_id)
             .order("phone_normalized")
             .range(offset, offset + page_size - 1)
@@ -42,6 +65,10 @@ class BatchMessageImport:
                 break
 
             offset += page_size
+
+        if wati_contact_ids is not None:
+            wanted = set(wati_contact_ids)
+            all_contacts = [c for c in all_contacts if c.get("wati_contact_id") in wanted]
 
         total = len(all_contacts)
         if total == 0:
@@ -120,6 +147,8 @@ class BatchMessageImport:
                 except Exception as exc:
                     print(f"  Error fetching messages for {phone}: {exc}", flush=True)
                     continue
+                if since is not None:
+                    messages = [m for m in messages if in_window(m, since, until)]
 
                 # Upsert messages into staging in batches of 100
                 for batch_start in range(0, len(messages), batch_size):

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from supabase_client import SupabaseClient
-from wati_client import WatiClient
+from wati_client import WatiClient, parse_wati_time
 from batch_contact_import import BatchContactImport
 from batch_message_import import BatchMessageImport
 from contact_identity_repair import ContactIdentityRepair
@@ -104,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--tenant-id", type=int, required=True, help="DB tenant ID")
     backfill_parser.add_argument("--limit", type=int, default=None, help="Max pages of canonical contacts to process (for testing)")
     backfill_parser.add_argument("--resume", type=str, default=None, help="Resume a failed/interrupted job by job_id")
+    backfill_parser.add_argument("--since", type=str, default=None, help="Only import messages at or after this ISO time (UTC if no offset); also imports contacts Wati updated since then")
+    backfill_parser.add_argument("--until", type=str, default=None, help="With --since: only import messages before this ISO time (default: now)")
     backfill_parser.add_argument("--_background", action="store_true", default=False, help=argparse.SUPPRESS)
     backfill_parser.set_defaults(handler=handle_backfill_messages)
 
@@ -512,14 +514,39 @@ def _check_existing_backfill(tenant_id: int) -> dict | None:
 
 def handle_backfill_messages(args: argparse.Namespace) -> int:
     resume_job_id = getattr(args, 'resume', None)
+    since = parse_wati_time(args.since) if args.since else None
+    until = parse_wati_time(args.until) if args.until else datetime.now(timezone.utc)
+    if args.since and since is None or args.until and until is None:
+        print("Error: --since and --until must be ISO timestamps.", file=sys.stderr)
+        return 1
+    if args.until and not args.since:
+        print("Error: --until requires --since.", file=sys.stderr)
+        return 1
+    if since and resume_job_id:
+        # Resume relies on contact order; a windowed contact set can shift between runs.
+        print("Error: --since cannot be combined with --resume; rerun the window instead.", file=sys.stderr)
+        return 1
 
     if getattr(args, '_background', False):
         # Child process — run synchronously
         try:
             db_client = get_supabase_client()
             wati = get_wati_client(args.tenant_id)
+            wati_contact_ids = None
+            if since:
+                # Contacts that first wrote during the window are not in
+                # canonical yet, and promotion drops messages without a contact.
+                contacts = BatchContactImport(db_client, wati, args.tenant_id).run(updated_since=since)
+                wati_contact_ids = contacts["wati_contact_ids"]
+                print(f"Contacts updated since {since.isoformat()}: {len(wati_contact_ids)}", flush=True)
             importer = BatchMessageImport(db_client, wati, args.tenant_id)
-            result = importer.run(limit=args.limit, resume_job_id=resume_job_id)
+            result = importer.run(
+                limit=args.limit,
+                resume_job_id=resume_job_id,
+                since=since,
+                until=until,
+                wati_contact_ids=wati_contact_ids,
+            )
             print(f"Done. total={result['total']} staged={result['upserted_staging']} canonical={result['upserted_canonical']} skipped={result['skipped']}", flush=True)
             return 0
         except Exception as exc:
@@ -556,6 +583,8 @@ def handle_backfill_messages(args: argparse.Namespace) -> int:
         cmd.extend(["--limit", str(args.limit)])
     if resume_job_id:
         cmd.extend(["--resume", resume_job_id])
+    if since:
+        cmd.extend(["--since", since.isoformat(), "--until", until.isoformat()])
 
     with open(log_file, "w") as lf:
         proc = subprocess.Popen(

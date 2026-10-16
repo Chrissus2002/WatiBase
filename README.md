@@ -78,7 +78,15 @@ The `--tenant-id` value is printed at the end of the `setup` step.
 
 # Resume an interrupted backfill
 ./wati-supabase backfill --tenant-id <ID> --resume <JOB_ID>
+
+# Recover a webhook outage: import only messages inside the window
+./wati-supabase backfill --tenant-id <ID> --since 2026-10-09T16:00:00Z --until 2026-10-12T01:00:00Z
 ```
+
+A windowed backfill first imports the contacts Wati updated since `--since`,
+so people who first wrote during the outage are not dropped, then fetches
+messages only for those contacts. Re-running a window is safe: messages that
+are already in canonical are left unchanged. It cannot be resumed; rerun it.
 
 ### Monitoring
 
