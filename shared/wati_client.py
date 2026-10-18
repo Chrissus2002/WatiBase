@@ -2,9 +2,32 @@ import json
 import os
 import requests
 import time
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from supabase_client import SupabaseClient
+
+
+def parse_wati_time(value) -> datetime | None:
+    """Parse a Wati timestamp into an aware UTC datetime.
+
+    Wati mixes epoch seconds, ISO strings with a `Z` suffix, and ISO strings
+    with no offset at all. The offset-less ones are UTC, which is also how the
+    database promotes them.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class WatiClient:

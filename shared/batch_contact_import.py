@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from contact_identity_repair import ContactIdentityRepair
 from supabase_client import SupabaseClient
-from wati_client import WatiClient
+from wati_client import WatiClient, parse_wati_time
 
 
 class BatchContactImport:
@@ -11,9 +11,16 @@ class BatchContactImport:
         self.wati_client = wati_client
         self.db_tenant_id = db_tenant_id
 
-    def run(self, limit: int = None) -> dict:
+    def run(self, limit: int = None, updated_since: datetime = None) -> dict:
         client = self.supabase_client.get_client()
         contacts = self.wati_client.get_contacts(max_pages=limit)
+        if updated_since is not None:
+            # Keep contacts Wati touched since the cutoff. A contact without
+            # lastUpdated is kept: dropping it could lose its messages.
+            contacts = [
+                c for c in contacts
+                if (parse_wati_time(c.get("lastUpdated")) or updated_since) >= updated_since
+            ]
         total = len(contacts)
         batch_size = 100
         upserted_staging = 0
@@ -99,4 +106,5 @@ class BatchContactImport:
             "total": total,
             "upserted_staging": upserted_staging,
             "upserted_canonical": upserted_canonical,
+            "wati_contact_ids": [str(c["id"]) for c in contacts if c.get("id")],
         }
