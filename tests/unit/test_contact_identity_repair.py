@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "shared"))
 
 from contact_identity_repair import (
+    ContactIdentityRepair,
     build_contact_snapshot,
     choose_survivor,
     plan_contact_repairs,
@@ -212,3 +213,62 @@ def test_plan_skips_phone_normalized_collision_outside_safe_duplicate_class():
     legacy_update = next(update for update in plan.contact_updates if update.contact_id == "legacy")
     assert "phone_normalized" not in legacy_update.fields
     assert legacy_update.fields["wati_lookup_phone"] == "5215539923400"
+
+
+class _FakeQuery:
+    """Minimal PostgREST stand-in: applies eq filters and serves one page."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.offset = 0
+
+    def eq(self, column, value):
+        self.rows = [row for row in self.rows if column not in row or row[column] == value]
+        return self
+
+    def range(self, start, _end):
+        self.offset = start
+        return self
+
+    def execute(self):
+        return type("Result", (), {"data": [] if self.offset else self.rows})()
+
+    def __getattr__(self, _name):
+        return lambda *args, **kwargs: self
+
+
+class _FakeClient:
+    def __init__(self, tables):
+        self.tables = tables
+
+    def schema(self, _name):
+        return self
+
+    def table(self, name):
+        return _FakeQuery(self.tables[name])
+
+    def rpc(self, name, _params):
+        return _FakeQuery(self.tables[name])
+
+
+def test_batch_run_sees_phone_owned_by_contact_outside_the_batch():
+    # The batch re-imports "legacy". Its corrected phone already belongs to
+    # "other", which is not in the batch. Loading only the batch would plan a
+    # duplicate phone_normalized and fail the import on the unique constraint.
+    contacts = [
+        {**_contact("legacy", phone_normalized="525539923400", phone_raw="525539923400", wati_contact_id="wati-1"), "batch_id": "b1"},
+        {**_contact("other", phone_normalized="5215539923400", phone_raw="5215539923400", wati_contact_id=None), "batch_id": "b0"},
+    ]
+    client = _FakeClient({
+        "tenant_connectors": [{"default_phone_region": "MX"}],
+        "contacts_raw_data": [{"wati_contact_id": "wati-1", "batch_id": "b1"}],
+        "contacts": contacts,
+        "contact_provider_keys": [_provider_key("wati-1", "legacy", provider_phone="5215539923400")],
+        "get_message_counts_by_contact": [],
+    })
+    supabase = type("Supabase", (), {"get_client": lambda self: client})()
+
+    summary = ContactIdentityRepair(supabase, 310131).run(batch_id="b1", dry_run=True)
+
+    assert summary["conflicts"] == 1
+    assert summary["conflict_details"][0]["reason"] == "phone_normalized_conflict"

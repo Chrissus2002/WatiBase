@@ -2,19 +2,30 @@
 -- numbers (52X → 521X). Mirrors the Python legacy_wati_lookup_phone() helper
 -- so SQL joins and Python fetches never drift apart.
 -- Lives in public so PostgREST can expose it via rpc if needed.
--- Written in pure SQL (not PL/pgSQL) so PostgreSQL can inline it and avoid
--- per-call interpreter overhead when called thousands of times in a query.
+-- Keep this PL/pgSQL. An inlinable SQL version made the planner re-run the
+-- regexps inside the contact join of process_messages_to_canonical: promoting
+-- 364 messages took 14s instead of 0.1s and hit the 8s PostgREST timeout.
 create or replace function public.normalize_phone(p_phone text)
 returns text as $$
-  select case
-    when p_phone is null then null
-    -- Mexican mobile fix: starts with '52' but third digit is not '1' → insert '1'
-    when left(regexp_replace(p_phone, '[^0-9]', '', 'g'), 2) = '52'
-     and left(regexp_replace(p_phone, '[^0-9]', '', 'g'), 3) != '521'
-    then '521' || substring(regexp_replace(p_phone, '[^0-9]', '', 'g') from 3)
-    else regexp_replace(p_phone, '[^0-9]', '', 'g')
-  end;
-$$ language sql immutable;
+declare
+  v_digits text;
+begin
+  if p_phone is null then
+    return null;
+  end if;
+
+  -- Strip all non-digits
+  v_digits := regexp_replace(p_phone, '[^0-9]', '', 'g');
+
+  -- Fix Mexican mobile numbers: 52XXXXXXXXXX → 521XXXXXXXXXX
+  -- If starts with '52' but third digit is not '1', insert '1' after '52'
+  if left(v_digits, 2) = '52' and left(v_digits, 3) != '521' then
+    v_digits := '521' || substring(v_digits from 3);
+  end if;
+
+  return v_digits;
+end;
+$$ language plpgsql immutable;
 
 
 -- Promote contacts from staging.contacts_raw_data into canonical.contacts
